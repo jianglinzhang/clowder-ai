@@ -11,36 +11,27 @@ RUN apt-get install -y --no-install-recommends \
  python3 \
  python3-pip \
  redis-server \
- tini
+ tini \
+ bash
 RUN rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# 复制项目文件
+# 复制项目
 COPY . .
 
 # 安装依赖
 RUN pnpm install --frozen-lockfile
 
-# 构建项目
+# 构建
 RUN pnpm build
 
-# 创建数据目录
-RUN mkdir -p /data/redis
-RUN mkdir -p /data/redis-backups
-RUN mkdir -p /data/logs/api
-
-# 调整权限给 node 用户
-RUN chown -R node:node /app
-RUN chown -R node:node /data
-
-# 生产环境变量
+# 生产环境
 ENV NODE_ENV=production
 ENV FRONTEND_HOST=0.0.0.0
 ENV FRONTEND_PORT=3003
 ENV API_SERVER_HOST=0.0.0.0
 ENV API_SERVER_PORT=3004
-ENV REDIS_HOST=127.0.0.1
 ENV REDIS_PORT=6399
 ENV REDIS_URL=redis://127.0.0.1:6399
 ENV REDIS_DATA_DIR=/data/redis
@@ -48,32 +39,38 @@ ENV REDIS_BACKUP_DIR=/data/redis-backups
 ENV LOG_DIR=/data/logs/api
 ENV ANTHROPIC_PROXY_ENABLED=0
 
-# 切换到 node 用户运行
-USER node
-
-# 暴露常用端口
-EXPOSE 3003
-EXPOSE 3004
-EXPOSE 6399
+# 给 Node 更大的堆
+# 如果平台内存小，可以改成 1024 或 1536
+ENV NODE_OPTIONS=--max-old-space-size=2048
 
 # 数据卷
 VOLUME ["/data"]
 
-# 启动
+# 暴露端口
+EXPOSE 3003
+EXPOSE 3004
+EXPOSE 6399
+
+# 写启动脚本
+RUN cat <<'EOF' > /usr/local/bin/docker-entrypoint.sh
+#!/bin/bash
+set -e
+
+mkdir -p /data/redis
+mkdir -p /data/redis-backups
+mkdir -p /data/logs/api
+
+if [ ! -f /app/.env ]; then
+  cp /app/.env.example /app/.env
+fi
+
+exec bash ./scripts/start-dev.sh \
+  --prod-web \
+  --profile=production \
+  --quick
+EOF
+
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["sh", "-c", "\
-if [ ! -f .env ]; then \
-  cp .env.example .env || true; \
-fi; \
-redis-server \
-  --bind 127.0.0.1 \
-  --port 6399 \
-  --dir /data/redis \
-  --dbfilename dump.rdb \
-  --appendonly yes \
-  --appendfilename appendonly.aof \
-  --save 60 1000 \
-  --pidfile /tmp/redis.pid \
-  --daemonize yes; \
-node ./scripts/start-entry.mjs start:direct --profile=production \
-"]
+CMD ["/usr/local/bin/docker-entrypoint.sh"]
