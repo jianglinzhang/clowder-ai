@@ -18,11 +18,10 @@ RUN pnpm build
 #生产环境配置（重要！）
 ENV NODE_ENV=production
 ENV API_SERVER_HOST=0.0.0.0
-ENV FRONTEND_PORT=7860
-# Hugging Face 默认要求7860端口
+ENV ANTHROPIC_PROXY_ENABLED=1
 ENV API_SERVER_PORT=3004
 # API端口（内部使用）
 
-EXPOSE 7860
+EXPOSE 3003
 #启动命令：使用 production模式 + --memory（单容器无需 Redis，数据内存存储，重启会丢失）
 CMD ["sh", "-c", "cp .env.example .env && node ./scripts/start-entry.mjs start:direct --profile=production --memory"]
