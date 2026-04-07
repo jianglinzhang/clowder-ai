@@ -20,7 +20,8 @@ ENV NODE_ENV=production
 ENV API_SERVER_HOST=0.0.0.0
 ENV FRONTEND_PORT=7860
 # Hugging Face 默认要求7860端口
-ENV API_SERVER_PORT=3004 # API端口（内部使用）
+ENV API_SERVER_PORT=3004
+# API端口（内部使用）
 
 EXPOSE 7860
 #启动命令：使用 production模式 + --memory（单容器无需 Redis，数据内存存储，重启会丢失）
