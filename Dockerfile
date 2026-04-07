@@ -12,17 +12,18 @@ WORKDIR /app
 #复制所有文件（pnpm monorepo 需要完整的 workspace结构）
 COPY . .
 
-#生产环境配置（重要！）
-ENV NODE_ENV=production
-ENV API_SERVER_HOST=0.0.0.0
-ENV ANTHROPIC_PROXY_ENABLED=1
-ENV API_SERVER_PORT=3004
+
 ENV NEXT_PUBLIC_API_URL=http://localhost:3004
 #安装依赖 +构建
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
 # API端口（内部使用）
+#生产环境配置（重要！）
+ENV NODE_ENV=production
+ENV API_SERVER_HOST=0.0.0.0
+ENV ANTHROPIC_PROXY_ENABLED=1
+ENV API_SERVER_PORT=3004
 
 EXPOSE 3003
 #启动命令：使用 production模式 + --memory（单容器无需 Redis，数据内存存储，重启会丢失）
