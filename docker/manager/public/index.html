@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Clowder AI Admin</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background: #0b1020; color: #e5e7eb; }
+    header { padding: 16px 20px; background: #111827; border-bottom: 1px solid #1f2937; }
+    a { color: #60a5fa; }
+    .wrap { padding: 16px; }
+    .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+    button { background: #2563eb; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; }
+    button.secondary { background: #374151; }
+    input { padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
+    pre { background: #020617; color: #d1fae5; border-radius: 8px; padding: 12px; overflow: auto; min-height: 300px; max-height: 600px; }
+    ul { list-style: none; padding: 0; margin: 8px 0 0 0; }
+    li { padding: 8px 10px; border-bottom: 1px solid #1f2937; cursor: pointer; }
+    li:hover { background: #0f172a; }
+    .muted { color: #94a3b8; font-size: 14px; }
+    .row { display: flex; gap: 12px; align-items: center; }
+    .row > * { flex: 1; }
+    #status { margin-top: 8px; color: #93c5fd; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h2 style="margin:0">Clowder AI 管理面板</h2>
+    <div class="muted" style="margin-top:8px">
+      主应用：<a href="/" target="_blank">打开 /</a>　
+      管理面板：<code>/__admin/</code>
+    </div>
+  </header>
+
+  <div class="wrap">
+    <div class="card">
+      <div class="row">
+        <div>
+          <label class="muted">ADMIN_TOKEN（如果你设置了）</label>
+          <input id="token" type="password" placeholder="没设置可留空" />
+        </div>
+        <div style="flex:0 0 160px; align-self:end">
+          <button onclick="saveToken()">保存 Token</button>
+        </div>
+      </div>
+
+      <div id="status">状态加载中...</div>
+
+      <div class="btns">
+        <button onclick="startApp()">启动应用</button>
+        <button class="secondary" onclick="stopApp()">停止应用</button>
+        <button onclick="runPreset('build')">pnpm build</button>
+        <button onclick="runPreset('status')">pnpm start:status</button>
+        <button onclick="runPreset('test')">pnpm test</button>
+        <button onclick="runPreset('runtimeStatus')">pnpm runtime:status</button>
+        <button onclick="runPreset('redisStatus')">pnpm redis:user:status</button>
+        <button class="secondary" onclick="runPreset('stopDaemon')">pnpm stop</button>
+      </div>
+
+      <div style="margin-top:12px">
+        <label class="muted">自定义命令（需容器环境开启 ADMIN_ENABLE_SHELL=1）</label>
+        <div class="row">
+          <input id="customCmd" placeholder='例如：pnpm check' />
+          <div style="flex:0 0 160px">
+            <button onclick="runCustom()">执行自定义命令</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h3 style="margin-top:0">实时日志</h3>
+        <pre id="logs"></pre>
+      </div>
+
+      <div class="card">
+        <h3 style="margin-top:0">文件管理器</h3>
+        <div class="muted">根目录：/app</div>
+        <div id="cwd" style="margin:8px 0 12px 0"></div>
+        <ul id="files"></ul>
+        <h4>文件预览</h4>
+        <pre id="viewer"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const ADMIN = "/__admin";
+    let eventSource = null;
+    let currentPath = "";
+
+    function getToken() {
+      return localStorage.getItem("adminToken") || "";
+    }
+
+    function saveToken() {
+      const v = document.getElementById("token").value.trim();
+      localStorage.setItem("adminToken", v);
+      connectLogs();
+      refreshStatus();
+      loadDir("");
+      alert("Token 已保存");
+    }
+
+    function headers(json = true) {
+      const h = {};
+      const token = getToken();
+      if (token) h["x-admin-token"] = token;
+      if (json) h["Content-Type"] = "application/json";
+      return h;
+    }
+
+    async function api(path, options = {}) {
+      const res = await fetch(path, {
+        ...options,
+        headers: {
+          ...headers(!(options.body instanceof FormData)),
+          ...(options.headers || {})
+        }
+      });
+      const ct = res.headers.get("content-type") || "";
+      if (!res.ok) {
+        const t = await res.text();
+        throw new Error(t || `HTTP ${res.status}`);
+      }
+      if (ct.includes("application/json")) return res.json();
+      return res.text();
+    }
+
+    async function refreshStatus() {
+      try {
+        const data = await api(`${ADMIN}/api/status`);
+        document.getElementById("status").innerHTML =
+          `运行状态：<b>${data.running ? "运行中" : "未运行"}</b> ` +
+          `${data.pid ? `(PID ${data.pid})` : ""}<br>` +
+          `启动命令：<code>${data.startCmd}</code><br>` +
+          `自定义 shell：<b>${data.adminEnableShell ? "已开启" : "未开启"}</b>`;
+      } catch (e) {
+        document.getElementById("status").textContent = `状态获取失败：${e.message}`;
+      }
+    }
+
+    async function startApp() {
+      await api(`${ADMIN}/api/start`, { method: "POST", body: "{}" });
+      refreshStatus();
+    }
+
+    async function stopApp() {
+      await api(`${ADMIN}/api/stop`, { method: "POST", body: "{}" });
+      refreshStatus();
+    }
+
+    async function runPreset(key) {
+      await api(`${ADMIN}/api/run`, {
+        method: "POST",
+        body: JSON.stringify({ key })
+      });
+    }
+
+    async function runCustom() {
+      const cmd = document.getElementById("customCmd").value.trim();
+      if (!cmd) return;
+      await api(`${ADMIN}/api/run`, {
+        method: "POST",
+        body: JSON.stringify({ cmd })
+      });
+    }
+
+    function connectLogs() {
+      if (eventSource) eventSource.close();
+
+      const token = getToken();
+      const qs = token ? `?token=${encodeURIComponent(token)}` : "";
+      eventSource = new EventSource(`${ADMIN}/api/logs${qs}`);
+
+      eventSource.onmessage = (ev) => {
+        try {
+          const item = JSON.parse(ev.data);
+          const box = document.getElementById("logs");
+          box.textContent += `[${item.ts}] ${item.line}\n`;
+          box.scrollTop = box.scrollHeight;
+        } catch {}
+      };
+    }
+
+    async function loadDir(p) {
+      currentPath = p || "";
+      const data = await api(`${ADMIN}/api/fs?path=${encodeURIComponent(currentPath)}`);
+      const files = document.getElementById("files");
+      const cwd = document.getElementById("cwd");
+
+      cwd.innerHTML = `当前目录：<code>/${data.cwd}</code>`;
+      files.innerHTML = "";
+
+      if (data.parent !== null) {
+        const up = document.createElement("li");
+        up.textContent = "📁 ..";
+        up.onclick = () => loadDir(data.parent);
+        files.appendChild(up);
+      }
+
+      for (const item of data.items) {
+        const li = document.createElement("li");
+        li.textContent = item.type === "dir"
+          ? `📁 ${item.name}`
+          : `📄 ${item.name} (${item.size} bytes)`;
+
+        li.onclick = async () => {
+          if (item.type === "dir") {
+            loadDir(item.path);
+          } else {
+            try {
+              const text = await api(`${ADMIN}/api/file?path=${encodeURIComponent(item.path)}`, {
+                headers: headers(false)
+              });
+              document.getElementById("viewer").textContent = text;
+            } catch (e) {
+              document.getElementById("viewer").textContent = `读取失败：${e.message}`;
+            }
+          }
+        };
+        files.appendChild(li);
+      }
+    }
+
+    document.getElementById("token").value = getToken();
+    connectLogs();
+    refreshStatus();
+    loadDir("");
+    setInterval(refreshStatus, 10000);
+  </script>
+</body>
+</html>
