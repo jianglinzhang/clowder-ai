@@ -174,6 +174,7 @@ function buildCatCafeMcpConfigArgs(workingDirectory?: string, callbackEnv?: Reco
     'CAT_CAFE_INVOCATION_ID',
     'CAT_CAFE_CALLBACK_TOKEN',
     'CAT_CAFE_USER_ID',
+    'CAT_CAFE_CAT_ID',
     'CAT_CAFE_SIGNAL_USER',
   ] as const;
   for (const key of callbackKeys) {
@@ -240,8 +241,7 @@ export class CodexAgentService implements AgentService {
 
     const sandboxMode = getCodexSandboxMode();
     const approvalPolicy = getCodexApprovalPolicy();
-    const modelArgs = ['--model', effectiveModel];
-    const effortLevel = getCatEffort(this.catId as string);
+    const effortLevel = getCatEffort(this.catId as string, undefined, 'openai');
     const reasoningArgs = ['--config', `model_reasoning_effort="${effortLevel}"`];
     const approvalArgs = ['--config', `approval_policy="${approvalPolicy}"`];
     const catCafeMcpArgs = buildCatCafeMcpConfigArgs(options?.workingDirectory, options?.callbackEnv);
@@ -271,6 +271,14 @@ export class CodexAgentService implements AgentService {
           'model_providers.custom.env_key="OPENAI_API_KEY"',
         ]
       : [];
+
+    // Codex CLI sends the model name verbatim to the API (model_info.slug).
+    // model_provider="custom" only controls which provider entry (base_url, env_key) to use.
+    // The model name is user-configured (no system-added prefix to strip).
+    // Use --config model=... instead of --model to bypass the CLI's built-in metadata lookup
+    // for custom providers (non-builtin models trigger a cosmetic warning via --model).
+    const cliModel = effectiveModel;
+    const modelArgs: string[] = customBaseUrl ? ['--config', `model=${toTomlString(cliModel)}`] : ['--model', cliModel];
 
     // resume 子命令不接受 --sandbox（sandbox 在创建时已锁定）
     // --add-dir .git: 允许写入 .git/ 目录（index.lock、objects、refs），解锁 git commit
@@ -312,7 +320,7 @@ export class CodexAgentService implements AgentService {
           ...promptArgs,
         ];
 
-    const metadata: MessageMetadata = { provider: 'openai', model: effectiveModel };
+    const metadata: MessageMetadata = { provider: 'openai', model: cliModel };
     const auditContext = options?.auditContext;
     const recentStreamErrors: string[] = [];
 
@@ -355,6 +363,22 @@ export class CodexAgentService implements AgentService {
         yield { type: 'done' as const, catId: this.catId, metadata, timestamp: Date.now() };
         return;
       }
+
+      log.debug(
+        {
+          catId: this.catId,
+          command: codexCommand,
+          model: cliModel,
+          originalModel: effectiveModel,
+          customBaseUrl: customBaseUrl ?? null,
+          sessionId: options?.sessionId ?? null,
+          invocationId: options?.invocationId ?? null,
+          cwd: options?.workingDirectory ?? null,
+          authMode,
+          argCount: args.length,
+        },
+        'Invoking Codex CLI',
+      );
 
       const cliOpts = {
         command: codexCommand,

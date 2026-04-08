@@ -55,7 +55,6 @@ export function buildChildEnv(overrides?: Record<string, string | null>): NodeJS
     merged[key] = value;
   }
   if (!overrides) return merged;
-  // Apply overrides (with null deletions)
   for (const [key, value] of Object.entries(overrides)) {
     if (value === null) {
       delete merged[key];
@@ -312,6 +311,17 @@ export async function* spawnCli(
       // Grace period: give the process time to exit naturally before force-killing.
       // If it exits within grace, great; if not, killChild() in finally will clean up.
       await Promise.race([exitPromise, new Promise<void>((r) => setTimeout(r, SEMANTIC_COMPLETION_GRACE_MS).unref())]);
+    }
+
+    if (exitCode === 0 && exitSignal === null && stderrBuffer.trim()) {
+      log.debug(
+        {
+          command: options.command,
+          hadNdjsonEvent: firstEventAt !== null,
+          stderr: stderrBuffer.trim().slice(-1000),
+        },
+        'CLI stderr on successful exit',
+      );
     }
 
     // Yield error on abnormal exit (only if WE didn't kill it AND no semantic completion)
