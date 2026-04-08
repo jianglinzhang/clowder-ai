@@ -27,4 +27,4 @@ ENV API_SERVER_PORT=3004
 
 EXPOSE 3003
 #启动命令：使用 production模式 + --memory（单容器无需 Redis，数据内存存储，重启会丢失）
-CMD ["sh", "-c", "cp .env.example.opensource .env && node ./scripts/start-entry.mjs start:direct --profile=production --memory"]
+CMD ["sh", "-c", "cp .env.example .env && node ./scripts/start-entry.mjs start:direct --profile=production --memory"]
