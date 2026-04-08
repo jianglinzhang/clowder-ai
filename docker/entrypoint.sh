@@ -43,4 +43,3 @@ mkdir -p /app/data/logs
 chown -R node:node /app /opt/manager "${DATA_ROOT}" || true
 
 exec node /opt/manager/server.js
-fi
