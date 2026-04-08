@@ -42,8 +42,5 @@ mkdir -p /app/data/logs
 
 chown -R node:node /app /opt/manager "${DATA_ROOT}" || true
 
-if command -v gosu >/dev/null 2>&1; then
-  exec gosu node node /opt/manager/server.js
-else
-  exec su -s /bin/bash node -c "node /opt/manager/server.js"
+exec node /opt/manager/server.js
 fi
