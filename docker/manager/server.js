@@ -11,7 +11,10 @@ const ROOT = path.resolve(process.env.APP_ROOT || "/app");
 const PORT = Number(process.env.PORT || 7860);
 const FRONTEND_PORT = Number(process.env.FRONTEND_PORT || 3003);
 const API_PORT = Number(process.env.API_SERVER_PORT || 3004);
-const ADMIN_BASE = process.env.ADMIN_BASE_PATH || "/__admin";
+const ADMIN_BASE_RAW = process.env.ADMIN_BASE_PATH || "/admin";
+const ADMIN_BASE = ADMIN_BASE_RAW.startsWith("/")
+  ? ADMIN_BASE_RAW.replace(/\/+$/, "") || "/admin"
+  : `/${ADMIN_BASE_RAW.replace(/\/+$/, "")}`;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const AUTO_START = process.env.AUTO_START !== "0";
 const START_CMD = process.env.APP_START_CMD || "pnpm start:direct";
@@ -132,6 +135,7 @@ app.get(`${ADMIN_BASE}/api/status`, requireAuth, (_req, res) => {
     running: !!mainProc,
     pid: mainProc?.pid || null,
     startCmd: START_CMD,
+    adminBase: ADMIN_BASE,
     adminEnableShell: ADMIN_ENABLE_SHELL,
     presets: Object.keys(PRESET_COMMANDS)
   });
@@ -249,7 +253,17 @@ app.get(`${ADMIN_BASE}/api/file`, requireAuth, async (req, res) => {
   }
 });
 
-app.use(ADMIN_BASE, express.static("/opt/manager/public"));
+app.use(
+  ADMIN_BASE,
+  express.static("/opt/manager/public", {
+    index: false,
+    redirect: false
+  })
+);
+
+app.get([ADMIN_BASE, `${ADMIN_BASE}/`, `${ADMIN_BASE}/index.html`], (_req, res) => {
+  res.sendFile("/opt/manager/public/index.html");
+});
 
 const apiProxy = createProxyMiddleware({
   target: `http://127.0.0.1:${API_PORT}`,
@@ -290,7 +304,9 @@ app.use("/socket.io", apiProxy);
 
 // 其余请求全部转给前端
 app.use((req, res, next) => {
-  if (req.path.startsWith(ADMIN_BASE)) return next();
+  if (req.path === ADMIN_BASE || req.path.startsWith(`${ADMIN_BASE}/`)) {
+    return next();
+  }
   return frontendProxy(req, res, next);
 });
 
