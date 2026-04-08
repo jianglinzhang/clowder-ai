@@ -76,10 +76,10 @@ ENV AUTO_START=1
 ENV APP_START_CMD="pnpm start:direct"
 
 # 管理面板路径
-ENV ADMIN_BASE_PATH=/__admin
+ENV ADMIN_BASE_PATH=/admin
 
 # 默认禁用任意 shell，自定义命令可手动开启
-ENV ADMIN_ENABLE_SHELL=0
+ENV ADMIN_ENABLE_SHELL=1
 
 # 建议你在部署平台里设置这个
 # ENV ADMIN_TOKEN=change-me
