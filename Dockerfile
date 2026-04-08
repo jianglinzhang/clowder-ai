@@ -1,30 +1,92 @@
-FROM node:20-slim
-#启用 pnpm（pnpm9+）
-RUN corepack enable && corepack prepare pnpm@9 --activate
-#安装少量系统依赖（如果启用语音服务可能需要 Python）
+FROM node:20-bookworm-slim AS build
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
- git \
- python3 \
- python3-pip \
- && rm -rf /var/lib/apt/lists/*
+    git \
+    ca-certificates \
+    redis-server \
+    bash \
+    python3 \
+    make \
+    g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 WORKDIR /app
-#复制所有文件（pnpm monorepo 需要完整的 workspace结构）
+
 COPY . .
 
+# 没有 .env 时，先复制一个，避免某些构建脚本读取失败
+RUN if [ ! -f .env ] && [ -f .env.example ]; then cp .env.example .env; fi
 
-ENV NEXT_PUBLIC_API_URL=http://localhost:3004
-#安装依赖 +构建
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
-# API端口（内部使用）
-#生产环境配置（重要！）
-ENV NODE_ENV=production
-ENV API_SERVER_HOST=0.0.0.0
-ENV ANTHROPIC_PROXY_ENABLED=1
-ENV API_SERVER_PORT=3004
+# 安装管理面板依赖
+WORKDIR /opt/manager
+COPY docker/manager/package.json /opt/manager/package.json
+RUN npm install --omit=dev
+COPY docker/manager /opt/manager
 
-EXPOSE 3003
-#启动命令：使用 production模式 + --memory（单容器无需 Redis，数据内存存储，重启会丢失）
-CMD ["sh", "-c", "cp .env.example .env && node ./scripts/start-entry.mjs start:direct --profile=production --memory"]
+
+FROM node:20-bookworm-slim AS runtime
+
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    ca-certificates \
+    redis-server \
+    bash \
+    procps \
+    dumb-init \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+
+WORKDIR /app
+
+COPY --from=build /app /app
+COPY --from=build /opt/manager /opt/manager
+COPY docker/entrypoint.sh /entrypoint.sh
+
+RUN mkdir -p /app/data /data/redis \
+    && chmod +x /entrypoint.sh \
+    && chown -R node:node /app /opt/manager /data /entrypoint.sh
+
+ENV NODE_ENV=production
+ENV APP_ROOT=/app
+
+# 外部平台只暴露一个端口，默认 7860
+ENV PORT=7860
+
+# 项目内部端口
+ENV FRONTEND_PORT=3003
+ENV API_SERVER_PORT=3004
+ENV REDIS_PORT=6399
+
+# 容器启动后自动拉起主程序
+ENV AUTO_START=1
+
+# 默认采用 direct 模式，避免 runtime worktree 在容器里出问题
+ENV APP_START_CMD="pnpm start:direct"
+
+# 管理面板路径
+ENV ADMIN_BASE_PATH=/__admin
+
+# 默认禁用任意 shell，自定义命令可手动开启
+ENV ADMIN_ENABLE_SHELL=0
+
+# 建议你在部署平台里设置这个
+# ENV ADMIN_TOKEN=change-me
+
+USER node
+
+EXPOSE 7860
+
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["/entrypoint.sh"]
