@@ -3,6 +3,7 @@ import multer from "multer";
 import fs from "node:fs/promises";
 import fssync from "node:fs";
 import path from "node:path";
+import net from "node:net";
 import { spawn } from "node:child_process";
 import { createProxyMiddleware } from "http-proxy-middleware";
 
@@ -27,11 +28,13 @@ const MAX_LOG_LINES = Number(process.env.MAX_LOG_LINES || 5000);
 let mainProc = null;
 const logBuffer = [];
 const logClients = new Set();
+
 const probeState = {
-  frontend: null,
-  apiRoot: null,
-  apiAudit: null,
-  lastRunAt: null
+  lastRunAt: null,
+  frontendPort: null,
+  apiPort: null,
+  frontendHttp: null,
+  apiAudit: null
 };
 
 const PRESET_COMMANDS = {
@@ -98,36 +101,88 @@ function formatSize(size) {
   return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
-async function probeUrl(tag, url) {
+function tcpProbe(port, tag) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+
+    const done = (data) => {
+      try { socket.destroy(); } catch {}
+      addLog(`[probe:tcp] ${tag} ${JSON.stringify(data)}`);
+      resolve(data);
+    };
+
+    socket.setTimeout(1500);
+
+    socket.on("connect", () => {
+      done({
+        ok: true,
+        port,
+        ms: Date.now() - started
+      });
+    });
+
+    socket.on("timeout", () => {
+      done({
+        ok: false,
+        port,
+        error: "timeout",
+        ms: Date.now() - started
+      });
+    });
+
+    socket.on("error", (e) => {
+      done({
+        ok: false,
+        port,
+        error: e.message,
+        ms: Date.now() - started
+      });
+    });
+  });
+}
+
+async function httpProbe(tag, url, init = {}) {
   try {
-    addLog(`[probe] ${tag} -> ${url}`);
-    const res = await fetch(url, { method: "GET", redirect: "manual" });
+    addLog(`[probe:http] ${tag} -> ${url}`);
+    const res = await fetch(url, {
+      method: "GET",
+      redirect: "manual",
+      ...init
+    });
     const text = await res.text().catch(() => "");
-    const item = {
-      ok: res.ok,
+    const data = {
+      ok: true,
       status: res.status,
       statusText: res.statusText,
-      bodyPreview: text.slice(0, 200),
-      at: new Date().toISOString()
+      bodyPreview: text.slice(0, 180)
     };
-    addLog(`[probe] ${tag} <= status=${res.status} body=${JSON.stringify(item.bodyPreview)}`);
-    return item;
+    addLog(`[probe:http] ${tag} <- ${JSON.stringify(data)}`);
+    return data;
   } catch (e) {
-    const item = {
+    const data = {
       ok: false,
-      error: e.message,
-      at: new Date().toISOString()
+      error: e.message
     };
-    addLog(`[probe] ${tag} ERROR ${e.message}`);
-    return item;
+    addLog(`[probe:http] ${tag} ERROR ${e.message}`);
+    return data;
   }
 }
 
 async function runProbes() {
   probeState.lastRunAt = new Date().toISOString();
-  probeState.frontend = await probeUrl("frontend", `http://127.0.0.1:${FRONTEND_PORT}/`);
-  probeState.apiRoot = await probeUrl("apiRoot", `http://127.0.0.1:${API_PORT}/`);
-  probeState.apiAudit = await probeUrl("apiAudit", `http://127.0.0.1:${API_PORT}/api/audit/thread/default`);
+  probeState.frontendPort = await tcpProbe(FRONTEND_PORT, "frontend");
+  probeState.apiPort = await tcpProbe(API_PORT, "api");
+  probeState.frontendHttp = await httpProbe("frontend", `http://127.0.0.1:${FRONTEND_PORT}/`);
+  probeState.apiAudit = await httpProbe(
+    "apiAudit",
+    `http://127.0.0.1:${API_PORT}/api/audit/thread/default?userId=default`,
+    {
+      headers: {
+        "X-Cat-Cafe-User": "default"
+      }
+    }
+  );
 }
 
 function spawnCommand(cmd, tag = "task", onExit) {
@@ -161,7 +216,7 @@ function spawnCommand(cmd, tag = "task", onExit) {
 
 function startMain() {
   if (mainProc) {
-    addLog("[main] startMain skipped: already running");
+    addLog("[main] start skipped: already running");
     return false;
   }
 
@@ -172,13 +227,16 @@ function startMain() {
     await runProbes();
   });
 
-  setTimeout(() => runProbes().catch((e) => addLog(`[probe] startup error ${e.message}`)), 6000);
+  setTimeout(() => {
+    runProbes().catch((e) => addLog(`[probe] startup error ${e.message}`));
+  }, 6000);
+
   return true;
 }
 
 function stopMain() {
   if (!mainProc) {
-    addLog("[main] stopMain skipped: no process");
+    addLog("[main] stop skipped: no process");
     return false;
   }
 
@@ -212,7 +270,6 @@ async function listDir(rel = "") {
   if (!stat.isDirectory()) throw new Error("Not a directory");
 
   const dirents = await fs.readdir(target, { withFileTypes: true });
-
   const items = await Promise.all(
     dirents.map(async (d) => {
       const full = path.join(target, d.name);
@@ -257,22 +314,16 @@ const ADMIN_HTML = `<!doctype html>
     header { padding:16px 20px; background:#111827; border-bottom:1px solid #1f2937; }
     .wrap { padding:16px; }
     .card { background:#111827; border:1px solid #1f2937; border-radius:12px; padding:16px; margin-bottom:16px; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
     .toolbar { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; align-items:center; }
-    button, .btn-label {
-      background:#2563eb; color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer; display:inline-block;
-    }
-    button.secondary, .btn-label.secondary { background:#374151; }
+    button,.btn-label { background:#2563eb; color:#fff; border:0; padding:10px 14px; border-radius:8px; cursor:pointer; display:inline-block; }
+    button.secondary,.btn-label.secondary { background:#374151; }
     button.danger { background:#dc2626; }
-    button.success, .btn-label.success { background:#16a34a; }
+    button.success,.btn-label.success { background:#16a34a; }
     button.warn { background:#d97706; }
-    input, textarea {
-      width:100%; padding:10px; border-radius:8px; border:1px solid #374151; background:#0f172a; color:#fff;
-    }
-    textarea { min-height:260px; font-family: monospace; }
-    pre {
-      margin:0; background:#020617; color:#d1fae5; border-radius:8px; padding:12px; min-height:280px; max-height:600px; overflow:auto; white-space:pre-wrap;
-    }
+    input,textarea { width:100%; padding:10px; border-radius:8px; border:1px solid #374151; background:#0f172a; color:#fff; }
+    textarea { min-height:260px; font-family:monospace; }
+    pre { margin:0; background:#020617; color:#d1fae5; border-radius:8px; padding:12px; min-height:280px; max-height:600px; overflow:auto; white-space:pre-wrap; }
     ul { list-style:none; padding:0; margin:8px 0 0 0; }
     li { padding:10px; border-bottom:1px solid #1f2937; }
     li:hover { background:#0f172a; }
@@ -287,7 +338,7 @@ const ADMIN_HTML = `<!doctype html>
     .badge { display:inline-block; padding:3px 8px; border-radius:999px; background:#1f2937; color:#cbd5e1; font-size:12px; }
     code { background:#0f172a; padding:2px 6px; border-radius:6px; }
     a { color:#60a5fa; }
-    @media (max-width:960px){ .grid { grid-template-columns: 1fr; } .row { flex-direction:column; align-items:stretch; } }
+    @media (max-width:960px){ .grid { grid-template-columns:1fr; } .row { flex-direction:column; align-items:stretch; } }
   </style>
 </head>
 <body>
@@ -318,6 +369,7 @@ const ADMIN_HTML = `<!doctype html>
         <button onclick="runPreset('test')">pnpm test</button>
         <button onclick="runPreset('runtimeStatus')">pnpm runtime:status</button>
         <button onclick="runPreset('redisStatus')">pnpm redis:user:status</button>
+        <button class="secondary" onclick="probeNow()">刷新探测</button>
       </div>
 
       <div style="margin-top:12px">
@@ -413,15 +465,15 @@ const ADMIN_HTML = `<!doctype html>
   async function refreshStatus() {
     try {
       var data = await api("/status");
-      var probe = data.probe || {};
       document.getElementById("status").innerHTML =
         "运行状态：<b>" + (data.running ? "运行中" : "未运行") + "</b> " +
         (data.pid ? "(PID " + data.pid + ")" : "") + "<br>" +
         "启动命令：<code>" + data.startCmd + "</code><br>" +
         "自定义 shell：<b>" + (data.adminEnableShell ? "已开启" : "未开启") + "</b><br>" +
-        "frontend probe：<code>" + JSON.stringify(probe.frontend || null) + "</code><br>" +
-        "api root probe：<code>" + JSON.stringify(probe.apiRoot || null) + "</code><br>" +
-        "api audit probe：<code>" + JSON.stringify(probe.apiAudit || null) + "</code>";
+        "frontendPort：<code>" + JSON.stringify(data.probe.frontendPort || null) + "</code><br>" +
+        "apiPort：<code>" + JSON.stringify(data.probe.apiPort || null) + "</code><br>" +
+        "frontendHttp：<code>" + JSON.stringify(data.probe.frontendHttp || null) + "</code><br>" +
+        "apiAudit：<code>" + JSON.stringify(data.probe.apiAudit || null) + "</code>";
     } catch (e) {
       document.getElementById("status").textContent = "状态获取失败：" + e.message;
     }
@@ -445,6 +497,11 @@ const ADMIN_HTML = `<!doctype html>
     var cmd = document.getElementById("customCmd").value.trim();
     if (!cmd) return;
     await api("/run", { method: "POST", body: JSON.stringify({ cmd: cmd }) });
+  }
+
+  async function probeNow() {
+    await api("/probe", { method: "POST", body: "{}" });
+    refreshStatus();
   }
 
   function connectLogs() {
@@ -639,6 +696,7 @@ const ADMIN_HTML = `<!doctype html>
   window.stopApp = stopApp;
   window.runPreset = runPreset;
   window.runCustom = runCustom;
+  window.probeNow = probeNow;
   window.saveToken = saveToken;
   window.refreshDir = refreshDir;
   window.goParent = goParent;
@@ -658,7 +716,7 @@ const ADMIN_HTML = `<!doctype html>
 </body>
 </html>`;
 
-/* ---------------- request log ---------------- */
+/* ---------------- global request log ---------------- */
 
 app.use((req, res, next) => {
   const start = Date.now();
@@ -674,24 +732,21 @@ app.use((req, res, next) => {
   next();
 });
 
-/* ---------------- admin page ---------------- */
+/* ---------------- admin page, no redirect ---------------- */
 
-app.get([ADMIN_BASE, `${ADMIN_BASE}/`, `${ADMIN_BASE}/index.html`], (req, res) => {
-  addLog(`[admin] serve html for ${req.originalUrl}`);
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.status(200).send(ADMIN_HTML);
+app.use((req, res, next) => {
+  const p = req.path || "/";
+  if (req.method !== "GET" && req.method !== "HEAD") return next();
+  if (p === ADMIN_BASE || p === `${ADMIN_BASE}/` || (p.startsWith(`${ADMIN_BASE}/`) && !p.startsWith(`${ADMIN_BASE}/api/`))) {
+    addLog(`[admin] serve html path=${p}`);
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.status(200).send(ADMIN_HTML);
+    return;
+  }
+  next();
 });
 
 /* ---------------- admin api ---------------- */
-
-app.get(`${ADMIN_BASE}/api/config`, (_req, res) => {
-  res.json({
-    ok: true,
-    adminBase: ADMIN_BASE,
-    root: ROOT,
-    shellEnabled: ADMIN_ENABLE_SHELL
-  });
-});
 
 app.get(`${ADMIN_BASE}/api/status`, requireAuth, async (_req, res) => {
   res.json({
@@ -704,6 +759,11 @@ app.get(`${ADMIN_BASE}/api/status`, requireAuth, async (_req, res) => {
     presets: Object.keys(PRESET_COMMANDS),
     probe: probeState
   });
+});
+
+app.post(`${ADMIN_BASE}/api/probe`, requireAuth, async (_req, res) => {
+  await runProbes();
+  res.json({ ok: true, probe: probeState });
 });
 
 app.post(`${ADMIN_BASE}/api/start`, requireAuth, async (_req, res) => {
@@ -753,11 +813,6 @@ app.get(`${ADMIN_BASE}/api/logs`, requireAuth, (req, res) => {
   });
 });
 
-app.post(`${ADMIN_BASE}/api/probe`, requireAuth, async (_req, res) => {
-  await runProbes();
-  res.json({ ok: true, probe: probeState });
-});
-
 /* ---------------- file manager ---------------- */
 
 app.get(`${ADMIN_BASE}/api/fs`, requireAuth, async (req, res) => {
@@ -779,9 +834,7 @@ app.get(`${ADMIN_BASE}/api/file`, requireAuth, async (req, res) => {
     const target = safeResolve(rel);
     const stat = await fs.stat(target);
     if (!stat.isFile()) return res.status(400).json({ ok: false, error: "Not a file" });
-    if (stat.size > 2 * 1024 * 1024) {
-      return res.status(413).json({ ok: false, error: "File too large (>2MB)" });
-    }
+    if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ ok: false, error: "File too large (>2MB)" });
     const content = await fs.readFile(target, "utf8");
     res.json({ ok: true, path: path.relative(ROOT, target), content });
   } catch (e) {
@@ -826,9 +879,7 @@ app.post(`${ADMIN_BASE}/api/fs/newfile`, requireAuth, async (req, res) => {
     addLog(`[fs] newfile dir=${dir} name=${name}`);
     const target = safeJoin(dir, name);
     await fs.mkdir(path.dirname(target), { recursive: true });
-    if (!fssync.existsSync(target)) {
-      await fs.writeFile(target, "", "utf8");
-    }
+    if (!fssync.existsSync(target)) await fs.writeFile(target, "", "utf8");
     res.json({ ok: true, path: path.relative(ROOT, target) });
   } catch (e) {
     addLog(`[fs] newfile error ${e.message}`);
@@ -911,7 +962,7 @@ app.post(`${ADMIN_BASE}/api/fs/upload`, requireAuth, upload.any(), async (req, r
   }
 });
 
-/* ---------------- debug endpoints ---------------- */
+/* ---------------- debug endpoint ---------------- */
 
 app.get("/healthz", async (_req, res) => {
   res.json({
@@ -926,15 +977,21 @@ app.get("/healthz", async (_req, res) => {
   });
 });
 
-/* ---------------- proxy ---------------- */
+/* ---------------- proxies ---------------- */
 
+/* 关键修复：保留原始 /api 前缀，不让 express mount 把 /api 吃掉 */
 const apiProxy = createProxyMiddleware({
   target: `http://127.0.0.1:${API_PORT}`,
   changeOrigin: true,
   ws: true,
   logLevel: "debug",
+  pathRewrite: (_path, req) => {
+    const out = req.originalUrl;
+    addLog(`[proxy:api] rewrite ${req.url} -> ${out}`);
+    return out;
+  },
   onProxyReq(proxyReq, req) {
-    addLog(`[proxy:api] -> ${req.method} ${req.originalUrl} => http://127.0.0.1:${API_PORT}${req.url}`);
+    addLog(`[proxy:api] -> ${req.method} ${req.originalUrl}`);
   },
   onProxyRes(proxyRes, req) {
     addLog(`[proxy:api] <- ${req.method} ${req.originalUrl} status=${proxyRes.statusCode}`);
@@ -947,13 +1004,37 @@ const apiProxy = createProxyMiddleware({
   }
 });
 
+const socketProxy = createProxyMiddleware({
+  target: `http://127.0.0.1:${API_PORT}`,
+  changeOrigin: true,
+  ws: true,
+  logLevel: "debug",
+  pathRewrite: (_path, req) => {
+    const out = req.originalUrl;
+    addLog(`[proxy:ws] rewrite ${req.url} -> ${out}`);
+    return out;
+  },
+  onProxyReq(proxyReq, req) {
+    addLog(`[proxy:ws] -> ${req.method} ${req.originalUrl}`);
+  },
+  onProxyRes(proxyRes, req) {
+    addLog(`[proxy:ws] <- ${req.method} ${req.originalUrl} status=${proxyRes.statusCode}`);
+  },
+  onError(err, req, res) {
+    addLog(`[proxy:ws] ERROR ${req.method} ${req.originalUrl} ${err.message}`);
+    if (!res.headersSent) {
+      res.status(503).json({ ok: false, error: "WS proxy error", detail: err.message });
+    }
+  }
+});
+
 const frontendProxy = createProxyMiddleware({
   target: `http://127.0.0.1:${FRONTEND_PORT}`,
   changeOrigin: true,
   ws: true,
   logLevel: "debug",
   onProxyReq(proxyReq, req) {
-    addLog(`[proxy:web] -> ${req.method} ${req.originalUrl} => http://127.0.0.1:${FRONTEND_PORT}${req.url}`);
+    addLog(`[proxy:web] -> ${req.method} ${req.originalUrl}`);
   },
   onProxyRes(proxyRes, req) {
     addLog(`[proxy:web] <- ${req.method} ${req.originalUrl} status=${proxyRes.statusCode}`);
@@ -966,27 +1047,18 @@ const frontendProxy = createProxyMiddleware({
   }
 });
 
-/* 关键：先挂 /api 和 /socket.io，再挂前端 */
 app.use("/api", (req, res, next) => {
-  addLog(`[route] /api matched ${req.method} ${req.originalUrl}`);
+  addLog(`[route] API matched ${req.method} ${req.originalUrl}`);
   next();
 }, apiProxy);
 
 app.use("/socket.io", (req, res, next) => {
-  addLog(`[route] /socket.io matched ${req.method} ${req.originalUrl}`);
+  addLog(`[route] SOCKET matched ${req.method} ${req.originalUrl}`);
   next();
-}, apiProxy);
+}, socketProxy);
 
-/* admin 其他路径一律返回 admin html，避免 308/404 */
-app.get(`${ADMIN_BASE}/*`, (req, res) => {
-  addLog(`[admin] wildcard html for ${req.originalUrl}`);
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.status(200).send(ADMIN_HTML);
-});
-
-/* 最后兜底到前端 */
 app.use((req, res, next) => {
-  addLog(`[route] frontend fallback ${req.method} ${req.originalUrl}`);
+  addLog(`[route] WEB fallback ${req.method} ${req.originalUrl}`);
   return frontendProxy(req, res, next);
 });
 
