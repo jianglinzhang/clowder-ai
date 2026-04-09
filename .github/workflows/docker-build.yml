@@ -6,6 +6,7 @@ on:
     tags: [ 'v*' ]                      # 打 tag 时也触发（推荐）
   pull_request:
     branches: [ "main", "master" ]
+  workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io                     # 使用 GitHub Container Registry（推荐）
