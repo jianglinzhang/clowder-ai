@@ -5,33 +5,59 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Clowder AI Admin</title>
   <style>
-    body { font-family: Arial, sans-serif; margin: 0; background: #0b1020; color: #e5e7eb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: Arial, sans-serif; background: #0b1020; color: #e5e7eb; }
     header { padding: 16px 20px; background: #111827; border-bottom: 1px solid #1f2937; }
-    a { color: #60a5fa; }
     .wrap { padding: 16px; }
     .card { background: #111827; border: 1px solid #1f2937; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
     .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-    .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
-    button { background: #2563eb; color: white; border: 0; padding: 10px 14px; border-radius: 8px; cursor: pointer; }
-    button.secondary { background: #374151; }
-    input { padding: 10px; border-radius: 8px; border: 1px solid #374151; background: #0f172a; color: white; width: 100%; box-sizing: border-box; }
-    pre { background: #020617; color: #d1fae5; border-radius: 8px; padding: 12px; overflow: auto; min-height: 300px; max-height: 600px; }
+    .btns, .toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
+    button, .btn-label {
+      background: #2563eb; color: white; border: 0; padding: 10px 14px;
+      border-radius: 8px; cursor: pointer; text-decoration: none; display: inline-block;
+    }
+    button.secondary, .btn-label.secondary { background: #374151; }
+    button.danger, .btn-label.danger { background: #dc2626; }
+    button.success, .btn-label.success { background: #16a34a; }
+    button.warn { background: #d97706; }
+    input, textarea {
+      padding: 10px; border-radius: 8px; border: 1px solid #374151;
+      background: #0f172a; color: white; width: 100%;
+    }
+    textarea { min-height: 260px; font-family: monospace; }
+    pre {
+      background: #020617; color: #d1fae5; border-radius: 8px; padding: 12px;
+      overflow: auto; min-height: 280px; max-height: 600px; white-space: pre-wrap;
+    }
     ul { list-style: none; padding: 0; margin: 8px 0 0 0; }
-    li { padding: 8px 10px; border-bottom: 1px solid #1f2937; cursor: pointer; }
+    li { padding: 10px; border-bottom: 1px solid #1f2937; }
     li:hover { background: #0f172a; }
+    a { color: #60a5fa; }
     .muted { color: #94a3b8; font-size: 14px; }
     .row { display: flex; gap: 12px; align-items: center; }
     .row > * { flex: 1; }
-    #status { margin-top: 8px; color: #93c5fd; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+    .status { margin-top: 8px; color: #93c5fd; line-height: 1.7; }
+    .path { margin: 8px 0 12px 0; word-break: break-all; }
+    .files .name { font-weight: bold; cursor: pointer; }
+    .files .meta { color: #94a3b8; font-size: 12px; margin-top: 4px; }
+    .files .actions { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 6px; }
+    .editor-box { margin-top: 12px; }
+    .hidden { display: none; }
+    .badge {
+      display: inline-block; padding: 3px 8px; border-radius: 999px;
+      background: #1f2937; color: #cbd5e1; font-size: 12px;
+    }
+    @media (max-width: 960px) {
+      .grid { grid-template-columns: 1fr; }
+      .row { flex-direction: column; align-items: stretch; }
+    }
   </style>
 </head>
 <body>
   <header>
     <h2 style="margin:0">Clowder AI 管理面板</h2>
     <div class="muted" style="margin-top:8px">
-      主应用：<a href="/" target="_blank">打开 /</a>　
-      管理面板：<code>/__admin/</code>
+      主应用：<a href="/" target="_blank">打开 /</a>
     </div>
   </header>
 
@@ -47,7 +73,7 @@
         </div>
       </div>
 
-      <div id="status">状态加载中...</div>
+      <div id="status" class="status">状态加载中...</div>
 
       <div class="btns">
         <button onclick="startApp()">启动应用</button>
@@ -61,10 +87,10 @@
       </div>
 
       <div style="margin-top:12px">
-        <label class="muted">自定义命令（需容器环境开启 ADMIN_ENABLE_SHELL=1）</label>
+        <label class="muted">自定义命令（需 ADMIN_ENABLE_SHELL=1）</label>
         <div class="row">
-          <input id="customCmd" placeholder='例如：pnpm check' />
-          <div style="flex:0 0 160px">
+          <input id="customCmd" placeholder="例如：pnpm check" />
+          <div style="flex:0 0 180px">
             <button onclick="runCustom()">执行自定义命令</button>
           </div>
         </div>
@@ -78,20 +104,43 @@
       </div>
 
       <div class="card">
-        <h3 style="margin-top:0">文件管理器</h3>
-        <div class="muted">根目录：/app</div>
-        <div id="cwd" style="margin:8px 0 12px 0"></div>
-        <ul id="files"></ul>
-        <h4>文件预览</h4>
-        <pre id="viewer"></pre>
+        <h3 style="margin-top:0">文件管理器 <span class="badge">根目录 /app</span></h3>
+        <div class="path" id="cwd">当前目录：/</div>
+
+        <div class="toolbar">
+          <button class="secondary" onclick="goParent()">上一级</button>
+          <button onclick="mkdirNow()">新建文件夹</button>
+          <button onclick="newFileNow()">新建文件</button>
+          <label class="btn-label success">
+            上传文件
+            <input id="uploadInput" type="file" multiple style="display:none" onchange="uploadFiles(this.files)" />
+          </label>
+          <button class="secondary" onclick="refreshDir()">刷新</button>
+        </div>
+
+        <ul id="files" class="files"></ul>
+
+        <div class="editor-box">
+          <h4>文件编辑器</h4>
+          <div class="muted" id="editingPath">未打开文件</div>
+          <textarea id="editor" placeholder="点击右侧文件打开编辑"></textarea>
+          <div class="toolbar">
+            <button onclick="saveCurrentFile()">保存文件</button>
+            <button class="secondary" onclick="clearEditor()">清空编辑器</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
-    const ADMIN = "/admin";
-    let eventSource = null;
     let currentPath = "";
+    let currentFilePath = "";
+    let eventSource = null;
+
+    function getApiBase() {
+      return "api";
+    }
 
     function getToken() {
       return localStorage.getItem("adminToken") || "";
@@ -102,11 +151,11 @@
       localStorage.setItem("adminToken", v);
       connectLogs();
       refreshStatus();
-      loadDir("");
+      loadDir(currentPath);
       alert("Token 已保存");
     }
 
-    function headers(json = true) {
+    function authHeaders(json = true) {
       const h = {};
       const token = getToken();
       if (token) h["x-admin-token"] = token;
@@ -115,25 +164,27 @@
     }
 
     async function api(path, options = {}) {
-      const res = await fetch(path, {
+      const res = await fetch(`${getApiBase()}${path}`, {
         ...options,
         headers: {
-          ...headers(!(options.body instanceof FormData)),
+          ...authHeaders(!(options.body instanceof FormData)),
           ...(options.headers || {})
         }
       });
-      const ct = res.headers.get("content-type") || "";
+
+      const text = await res.text();
+      let data = text;
+      try { data = JSON.parse(text); } catch {}
+
       if (!res.ok) {
-        const t = await res.text();
-        throw new Error(t || `HTTP ${res.status}`);
+        throw new Error((data && data.error) || text || `HTTP ${res.status}`);
       }
-      if (ct.includes("application/json")) return res.json();
-      return res.text();
+      return data;
     }
 
     async function refreshStatus() {
       try {
-        const data = await api(`${ADMIN}/api/status`);
+        const data = await api("/status");
         document.getElementById("status").innerHTML =
           `运行状态：<b>${data.running ? "运行中" : "未运行"}</b> ` +
           `${data.pid ? `(PID ${data.pid})` : ""}<br>` +
@@ -145,17 +196,17 @@
     }
 
     async function startApp() {
-      await api(`${ADMIN}/api/start`, { method: "POST", body: "{}" });
+      await api("/start", { method: "POST", body: "{}" });
       refreshStatus();
     }
 
     async function stopApp() {
-      await api(`${ADMIN}/api/stop`, { method: "POST", body: "{}" });
+      await api("/stop", { method: "POST", body: "{}" });
       refreshStatus();
     }
 
     async function runPreset(key) {
-      await api(`${ADMIN}/api/run`, {
+      await api("/run", {
         method: "POST",
         body: JSON.stringify({ key })
       });
@@ -164,7 +215,7 @@
     async function runCustom() {
       const cmd = document.getElementById("customCmd").value.trim();
       if (!cmd) return;
-      await api(`${ADMIN}/api/run`, {
+      await api("/run", {
         method: "POST",
         body: JSON.stringify({ cmd })
       });
@@ -175,7 +226,7 @@
 
       const token = getToken();
       const qs = token ? `?token=${encodeURIComponent(token)}` : "";
-      eventSource = new EventSource(`${ADMIN}/api/logs${qs}`);
+      eventSource = new EventSource(`${getApiBase()}/logs${qs}`);
 
       eventSource.onmessage = (ev) => {
         try {
@@ -187,50 +238,195 @@
       };
     }
 
-    async function loadDir(p) {
-      currentPath = p || "";
-      const data = await api(`${ADMIN}/api/fs?path=${encodeURIComponent(currentPath)}`);
-      const files = document.getElementById("files");
-      const cwd = document.getElementById("cwd");
+    function fileButton(text, cls, onClick) {
+      const btn = document.createElement("button");
+      btn.className = cls || "";
+      btn.textContent = text;
+      btn.onclick = onClick;
+      return btn;
+    }
 
-      cwd.innerHTML = `当前目录：<code>/${data.cwd}</code>`;
+    async function loadDir(p = "") {
+      currentPath = p || "";
+      const data = await api(`/fs?path=${encodeURIComponent(currentPath)}`);
+      document.getElementById("cwd").innerHTML = `当前目录：<code>/${data.cwd}</code>`;
+
+      const files = document.getElementById("files");
       files.innerHTML = "";
+
+      if (!data.items.length && data.parent === null) {
+        const li = document.createElement("li");
+        li.textContent = "目录为空";
+        files.appendChild(li);
+      }
 
       if (data.parent !== null) {
         const up = document.createElement("li");
-        up.textContent = "📁 ..";
+        up.innerHTML = `<div class="name">📁 ..</div>`;
         up.onclick = () => loadDir(data.parent);
         files.appendChild(up);
       }
 
       for (const item of data.items) {
         const li = document.createElement("li");
-        li.textContent = item.type === "dir"
-          ? `📁 ${item.name}`
-          : `📄 ${item.name} (${item.size} bytes)`;
 
-        li.onclick = async () => {
-          if (item.type === "dir") {
-            loadDir(item.path);
-          } else {
-            try {
-              const text = await api(`${ADMIN}/api/file?path=${encodeURIComponent(item.path)}`, {
-                headers: headers(false)
-              });
-              document.getElementById("viewer").textContent = text;
-            } catch (e) {
-              document.getElementById("viewer").textContent = `读取失败：${e.message}`;
-            }
-          }
+        const name = document.createElement("div");
+        name.className = "name";
+        name.textContent = item.type === "dir" ? `📁 ${item.name}` : `📄 ${item.name}`;
+        name.onclick = () => {
+          if (item.type === "dir") loadDir(item.path);
+          else openFile(item.path);
         };
+
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        meta.textContent = item.type === "dir"
+          ? `${item.type} | ${item.mtime || ""}`
+          : `${item.sizeText || item.size} | ${item.mtime || ""}`;
+
+        const actions = document.createElement("div");
+        actions.className = "actions";
+
+        if (item.type === "file") {
+          actions.appendChild(fileButton("打开", "", () => openFile(item.path)));
+          actions.appendChild(fileButton("下载", "success", () => downloadFile(item.path)));
+        } else {
+          actions.appendChild(fileButton("进入", "", () => loadDir(item.path)));
+        }
+
+        actions.appendChild(fileButton("重命名", "warn", () => renameItem(item.path, item.name)));
+        actions.appendChild(fileButton("删除", "danger", () => deleteItem(item.path, item.type)));
+
+        li.appendChild(name);
+        li.appendChild(meta);
+        li.appendChild(actions);
         files.appendChild(li);
       }
+    }
+
+    function refreshDir() {
+      loadDir(currentPath);
+    }
+
+    function goParent() {
+      if (!currentPath) return;
+      const parts = currentPath.split("/").filter(Boolean);
+      parts.pop();
+      loadDir(parts.join("/"));
+    }
+
+    async function mkdirNow() {
+      const name = prompt("请输入新文件夹名称");
+      if (!name) return;
+      await api("/fs/mkdir", {
+        method: "POST",
+        body: JSON.stringify({ path: currentPath, name })
+      });
+      refreshDir();
+    }
+
+    async function newFileNow() {
+      const name = prompt("请输入新文件名");
+      if (!name) return;
+      const data = await api("/fs/newfile", {
+        method: "POST",
+        body: JSON.stringify({ path: currentPath, name })
+      });
+      refreshDir();
+      if (data.path) openFile(data.path);
+    }
+
+    async function renameItem(pathValue, oldName) {
+      const newName = prompt("请输入新名称", oldName);
+      if (!newName || newName === oldName) return;
+      await api("/fs/rename", {
+        method: "POST",
+        body: JSON.stringify({ path: pathValue, newName })
+      });
+      refreshDir();
+    }
+
+    async function deleteItem(pathValue, type) {
+      if (!confirm(`确认删除这个${type === "dir" ? "文件夹" : "文件"}？\n${pathValue}`)) return;
+      await api("/fs/delete", {
+        method: "POST",
+        body: JSON.stringify({ path: pathValue })
+      });
+      if (currentFilePath === pathValue) clearEditor();
+      refreshDir();
+    }
+
+    async function openFile(pathValue) {
+      const data = await api(`/file?path=${encodeURIComponent(pathValue)}`);
+      currentFilePath = pathValue;
+      document.getElementById("editingPath").innerHTML = `当前文件：<code>${pathValue}</code>`;
+      document.getElementById("editor").value = data.content || "";
+    }
+
+    async function saveCurrentFile() {
+      if (!currentFilePath) {
+        alert("请先打开一个文件");
+        return;
+      }
+      const content = document.getElementById("editor").value;
+      await api("/file", {
+        method: "POST",
+        body: JSON.stringify({ path: currentFilePath, content })
+      });
+      alert("保存成功");
+      refreshDir();
+    }
+
+    function clearEditor() {
+      currentFilePath = "";
+      document.getElementById("editingPath").textContent = "未打开文件";
+      document.getElementById("editor").value = "";
+    }
+
+    function downloadFile(pathValue) {
+      const token = getToken();
+      const qs = token
+        ? `?path=${encodeURIComponent(pathValue)}&token=${encodeURIComponent(token)}`
+        : `?path=${encodeURIComponent(pathValue)}`;
+      window.open(`${getApiBase()}/fs/download${qs}`, "_blank");
+    }
+
+    async function uploadFiles(fileList) {
+      if (!fileList || !fileList.length) return;
+
+      const fd = new FormData();
+      fd.append("path", currentPath);
+      for (const f of fileList) {
+        fd.append("files", f, f.webkitRelativePath || f.name);
+      }
+
+      const token = getToken();
+      const headers = token ? { "x-admin-token": token } : {};
+
+      const res = await fetch(`${getApiBase()}/fs/upload`, {
+        method: "POST",
+        body: fd,
+        headers
+      });
+
+      const text = await res.text();
+      let data = text;
+      try { data = JSON.parse(text); } catch {}
+
+      if (!res.ok) {
+        throw new Error((data && data.error) || text || `HTTP ${res.status}`);
+      }
+
+      document.getElementById("uploadInput").value = "";
+      refreshDir();
+      alert(`上传完成：${data.saved || 0} 个文件`);
     }
 
     document.getElementById("token").value = getToken();
     connectLogs();
     refreshStatus();
     loadDir("");
+
     setInterval(refreshStatus, 10000);
   </script>
 </body>
