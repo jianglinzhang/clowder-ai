@@ -30,17 +30,11 @@ set_kv FRONTEND_PORT 3003; \
 set_kv API_SERVER_PORT 3004; \
 set_kv REDIS_PORT 6399; \
 set_kv NEXT_PUBLIC_API_URL /api; \
-echo "[build] final .env"; cat .env; \
+cat .env; \
 '
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
-
-WORKDIR /opt/manager
-COPY docker/manager/package.json /opt/manager/package.json
-RUN npm install --omit=dev
-COPY docker/manager /opt/manager
-
 
 FROM node:20-bookworm-slim AS runtime
 
@@ -54,17 +48,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     procps \
     dumb-init \
+    nginx \
+    python3 \
+    python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --no-cache-dir flask==3.0.3
 
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 WORKDIR /app
 
 COPY --from=build /app /app
-COPY --from=build /opt/manager /opt/manager
 COPY docker/entrypoint.sh /entrypoint.sh
+COPY docker/manager.py /opt/manager.py
+COPY docker/nginx.conf /etc/nginx/nginx.conf
 
-RUN chmod +x /entrypoint.sh
+RUN chmod +x /entrypoint.sh \
+    && mkdir -p /var/lib/nginx /var/log/nginx /run/nginx
 
 ENV NODE_ENV=production
 ENV APP_ROOT=/app
@@ -72,9 +73,9 @@ ENV PORT=7860
 ENV FRONTEND_PORT=3003
 ENV API_SERVER_PORT=3004
 ENV REDIS_PORT=6399
+ENV MANAGER_PORT=7861
 ENV AUTO_START=1
 ENV APP_START_CMD="pnpm start:direct"
-ENV ADMIN_BASE_PATH=/admin
 ENV ADMIN_ENABLE_SHELL=0
 ENV MAX_LOG_LINES=5000
 
