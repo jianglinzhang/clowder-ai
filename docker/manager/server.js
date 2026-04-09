@@ -17,7 +17,7 @@ const ADMIN_BASE = ADMIN_BASE_RAW.startsWith("/")
   : `/${ADMIN_BASE_RAW.replace(/\/+$/, "")}`;
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const AUTO_START = process.env.AUTO_START !== "0";
-const START_CMD = process.env.APP_START_CMD || "pnpm start:direct";
+const START_CMD = process.env.APP_START_CMD || "pnpm start";
 const ADMIN_ENABLE_SHELL = process.env.ADMIN_ENABLE_SHELL === "1";
 const MAX_LOG_LINES = Number(process.env.MAX_LOG_LINES || 3000);
 
