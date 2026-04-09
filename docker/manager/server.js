@@ -1,25 +1,31 @@
 import express from "express";
-import { createProxyMiddleware } from "http-proxy-middleware";
+import multer from "multer";
 import fs from "node:fs/promises";
+import fssync from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { createProxyMiddleware } from "http-proxy-middleware";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 const ROOT = path.resolve(process.env.APP_ROOT || "/app");
 const PORT = Number(process.env.PORT || 7860);
 const FRONTEND_PORT = Number(process.env.FRONTEND_PORT || 3003);
 const API_PORT = Number(process.env.API_SERVER_PORT || 3004);
-const ADMIN_BASE_RAW = process.env.ADMIN_BASE_PATH || "/admin";
-const ADMIN_BASE = ADMIN_BASE_RAW.startsWith("/")
-  ? ADMIN_BASE_RAW.replace(/\/+$/, "") || "/admin"
-  : `/${ADMIN_BASE_RAW.replace(/\/+$/, "")}`;
+
+const ADMIN_BASE = normalizeBase(process.env.ADMIN_BASE_PATH || "/admin");
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || "";
 const AUTO_START = process.env.AUTO_START !== "0";
-const START_CMD = process.env.APP_START_CMD || "pnpm start";
+const START_CMD = process.env.APP_START_CMD || "pnpm start:direct";
 const ADMIN_ENABLE_SHELL = process.env.ADMIN_ENABLE_SHELL === "1";
 const MAX_LOG_LINES = Number(process.env.MAX_LOG_LINES || 3000);
+
+const PUBLIC_DIR = "/opt/manager/public";
+const INDEX_FILE = path.join(PUBLIC_DIR, "index.html");
 
 let mainProc = null;
 const logBuffer = [];
@@ -34,16 +40,26 @@ const PRESET_COMMANDS = {
   redisStatus: "pnpm redis:user:status || true"
 };
 
+function normalizeBase(base) {
+  if (!base.startsWith("/")) base = `/${base}`;
+  return base.replace(/\/+$/, "");
+}
+
 function addLog(line) {
   const item = {
     ts: new Date().toISOString(),
     line: String(line).replace(/\r/g, "")
   };
+
   logBuffer.push(item);
   if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
 
   const payload = `data: ${JSON.stringify(item)}\n\n`;
-  for (const res of logClients) res.write(payload);
+  for (const res of logClients) {
+    try {
+      res.write(payload);
+    } catch {}
+  }
 
   console.log(item.line);
 }
@@ -56,6 +72,12 @@ function safeResolve(rel = "") {
   const target = path.resolve(ROOT, rel || ".");
   if (!isInsideRoot(target)) throw new Error("Path out of root");
   return target;
+}
+
+function safeJoin(relDir = "", name = "") {
+  const cleanName = path.basename(String(name || "").trim());
+  if (!cleanName) throw new Error("Invalid name");
+  return safeResolve(path.join(relDir || "", cleanName));
 }
 
 function requireAuth(req, res, next) {
@@ -128,6 +150,78 @@ function stopMain() {
   return true;
 }
 
+function formatSize(size) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  if (size < 1024 * 1024 * 1024) return `${(size / 1024 / 1024).toFixed(1)} MB`;
+  return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
+}
+
+async function listDir(rel = "") {
+  const target = safeResolve(rel);
+  const stat = await fs.stat(target);
+  if (!stat.isDirectory()) throw new Error("Not a directory");
+
+  const dirents = await fs.readdir(target, { withFileTypes: true });
+
+  const items = await Promise.all(
+    dirents.map(async (d) => {
+      const full = path.join(target, d.name);
+      let st = null;
+      try {
+        st = await fs.stat(full);
+      } catch {}
+
+      return {
+        name: d.name,
+        path: path.relative(ROOT, full),
+        type: d.isDirectory() ? "dir" : "file",
+        size: st?.size || 0,
+        sizeText: st ? formatSize(st.size || 0) : "",
+        mtime: st?.mtime || null
+      };
+    })
+  );
+
+  items.sort((a, b) => {
+    if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+
+  return {
+    ok: true,
+    root: ROOT,
+    cwd: path.relative(ROOT, target) || "",
+    parent: target === ROOT ? null : path.relative(ROOT, path.dirname(target)),
+    items
+  };
+}
+
+app.get("/healthz", (_req, res) => {
+  res.json({ ok: true, running: !!mainProc });
+});
+
+/* ---------------- Admin Page ---------------- */
+
+app.get(ADMIN_BASE, (_req, res) => {
+  res.redirect(`${ADMIN_BASE}/`);
+});
+
+app.get(`${ADMIN_BASE}/`, (_req, res) => {
+  res.sendFile(INDEX_FILE);
+});
+
+/* ---------------- Admin APIs ---------------- */
+
+app.get(`${ADMIN_BASE}/api/config`, (_req, res) => {
+  res.json({
+    ok: true,
+    adminBase: ADMIN_BASE,
+    root: ROOT,
+    shellEnabled: ADMIN_ENABLE_SHELL
+  });
+});
+
 app.get(`${ADMIN_BASE}/api/status`, requireAuth, (_req, res) => {
   res.json({
     ok: true,
@@ -135,7 +229,6 @@ app.get(`${ADMIN_BASE}/api/status`, requireAuth, (_req, res) => {
     running: !!mainProc,
     pid: mainProc?.pid || null,
     startCmd: START_CMD,
-    adminBase: ADMIN_BASE,
     adminEnableShell: ADMIN_ENABLE_SHELL,
     presets: Object.keys(PRESET_COMMANDS)
   });
@@ -170,7 +263,7 @@ app.post(`${ADMIN_BASE}/api/run`, requireAuth, (req, res) => {
   });
 });
 
-app.get(`${ADMIN_BASE}/api/logs`, requireAuth, (_req, res) => {
+app.get(`${ADMIN_BASE}/api/logs`, requireAuth, (req, res) => {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
@@ -180,51 +273,20 @@ app.get(`${ADMIN_BASE}/api/logs`, requireAuth, (_req, res) => {
   }
 
   logClients.add(res);
-  req.on?.("close", () => logClients.delete(res));
+  req.on("close", () => {
+    logClients.delete(res);
+  });
 });
+
+/* ---------------- File Manager APIs ---------------- */
 
 app.get(`${ADMIN_BASE}/api/fs`, requireAuth, async (req, res) => {
   try {
     const rel = String(req.query.path || "");
-    const target = safeResolve(rel);
-    const stat = await fs.stat(target);
-
-    if (!stat.isDirectory()) {
-      return res.status(400).json({ ok: false, error: "Not a directory" });
-    }
-
-    const dirents = await fs.readdir(target, { withFileTypes: true });
-    const items = await Promise.all(
-      dirents.map(async (d) => {
-        const full = path.join(target, d.name);
-        let st = null;
-        try {
-          st = await fs.stat(full);
-        } catch {}
-        return {
-          name: d.name,
-          path: path.relative(ROOT, full),
-          type: d.isDirectory() ? "dir" : "file",
-          size: st?.size || 0,
-          mtime: st?.mtime || null
-        };
-      })
-    );
-
-    items.sort((a, b) => {
-      if (a.type !== b.type) return a.type === "dir" ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-
-    return res.json({
-      ok: true,
-      root: ROOT,
-      cwd: path.relative(ROOT, target) || "",
-      parent: target === ROOT ? null : path.relative(ROOT, path.dirname(target)),
-      items
-    });
+    const data = await listDir(rel);
+    res.json(data);
   } catch (e) {
-    return res.status(400).json({ ok: false, error: e.message });
+    res.status(400).json({ ok: false, error: e.message });
   }
 });
 
@@ -238,32 +300,166 @@ app.get(`${ADMIN_BASE}/api/file`, requireAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: "Not a file" });
     }
 
-    if (stat.size > 1024 * 1024) {
+    if (stat.size > 2 * 1024 * 1024) {
       return res.status(413).json({
         ok: false,
-        error: "File too large (>1MB), download/view manually"
+        error: "File too large (>2MB), please download instead"
       });
     }
 
     const content = await fs.readFile(target, "utf8");
-    res.setHeader("Content-Type", "text/plain; charset=utf-8");
-    return res.send(content);
+    res.json({
+      ok: true,
+      path: path.relative(ROOT, target),
+      content
+    });
   } catch (e) {
-    return res.status(400).json({ ok: false, error: e.message });
+    res.status(400).json({ ok: false, error: e.message });
   }
 });
 
-app.use(
-  ADMIN_BASE,
-  express.static("/opt/manager/public", {
-    index: false,
-    redirect: false
-  })
-);
+app.post(`${ADMIN_BASE}/api/file`, requireAuth, async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    const content = String(req.body?.content ?? "");
+    const target = safeResolve(rel);
 
-app.get([ADMIN_BASE, `${ADMIN_BASE}/`, `${ADMIN_BASE}/index.html`], (_req, res) => {
-  res.sendFile("/opt/manager/public/index.html");
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, content, "utf8");
+
+    res.json({ ok: true, path: rel });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
 });
+
+app.post(`${ADMIN_BASE}/api/fs/mkdir`, requireAuth, async (req, res) => {
+  try {
+    const dir = String(req.body?.path || "");
+    const name = String(req.body?.name || "");
+    const target = safeJoin(dir, name);
+
+    await fs.mkdir(target, { recursive: true });
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post(`${ADMIN_BASE}/api/fs/newfile`, requireAuth, async (req, res) => {
+  try {
+    const dir = String(req.body?.path || "");
+    const name = String(req.body?.name || "");
+    const target = safeJoin(dir, name);
+
+    await fs.mkdir(path.dirname(target), { recursive: true });
+
+    if (!fssync.existsSync(target)) {
+      await fs.writeFile(target, "", "utf8");
+    }
+
+    res.json({ ok: true, path: path.relative(ROOT, target) });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post(`${ADMIN_BASE}/api/fs/delete`, requireAuth, async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    const target = safeResolve(rel);
+
+    if (target === ROOT) {
+      return res.status(403).json({ ok: false, error: "Cannot delete root" });
+    }
+
+    const stat = await fs.stat(target);
+    if (stat.isDirectory()) {
+      await fs.rm(target, { recursive: true, force: true });
+    } else {
+      await fs.unlink(target);
+    }
+
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post(`${ADMIN_BASE}/api/fs/rename`, requireAuth, async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    const newName = String(req.body?.newName || "");
+    const oldTarget = safeResolve(rel);
+
+    const parentRel = path.dirname(rel) === "." ? "" : path.dirname(rel);
+    const newTarget = safeJoin(parentRel, newName);
+
+    await fs.rename(oldTarget, newTarget);
+
+    res.json({
+      ok: true,
+      oldPath: rel,
+      newPath: path.relative(ROOT, newTarget)
+    });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.get(`${ADMIN_BASE}/api/fs/download`, requireAuth, async (req, res) => {
+  try {
+    const rel = String(req.query.path || "");
+    const target = safeResolve(rel);
+    const stat = await fs.stat(target);
+
+    if (!stat.isFile()) {
+      return res.status(400).json({ ok: false, error: "Not a file" });
+    }
+
+    res.download(target, path.basename(target));
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+app.post(`${ADMIN_BASE}/api/fs/upload`, requireAuth, upload.any(), async (req, res) => {
+  try {
+    const dirRel = String(req.body?.path || "");
+    const baseDir = safeResolve(dirRel);
+
+    const st = await fs.stat(baseDir);
+    if (!st.isDirectory()) {
+      return res.status(400).json({ ok: false, error: "Target is not a directory" });
+    }
+
+    const files = req.files || [];
+    let saved = 0;
+
+    for (const file of files) {
+      let relName = String(file.originalname || "").replace(/\\/g, "/").replace(/^\/+/, "");
+      if (!relName || relName.includes("..")) continue;
+
+      const dest = safeResolve(path.join(dirRel, relName));
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, file.buffer);
+      saved++;
+    }
+
+    res.json({ ok: true, saved });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+/* 兼容 /admin/xxx 这种路径，统一回 index */
+app.get(`${ADMIN_BASE}/*`, (req, res, next) => {
+  if (req.path.startsWith(`${ADMIN_BASE}/api/`)) return next();
+  res.sendFile(INDEX_FILE);
+});
+
+/* ---------------- Proxies ---------------- */
 
 const apiProxy = createProxyMiddleware({
   target: `http://127.0.0.1:${API_PORT}`,
@@ -302,7 +498,6 @@ const frontendProxy = createProxyMiddleware({
 app.use("/api", apiProxy);
 app.use("/socket.io", apiProxy);
 
-// 其余请求全部转给前端
 app.use((req, res, next) => {
   if (req.path === ADMIN_BASE || req.path.startsWith(`${ADMIN_BASE}/`)) {
     return next();
