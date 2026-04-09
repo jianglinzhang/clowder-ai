@@ -3,17 +3,12 @@ import net from "node:net";
 import path from "node:path";
 import fs from "node:fs/promises";
 import fssync from "node:fs";
+import { URL } from "node:url";
 import { spawn } from "node:child_process";
 
 import express from "express";
 import multer from "multer";
 import httpProxy from "http-proxy";
-
-const app = express();
-const server = http.createServer(app);
-const upload = multer({ storage: multer.memoryStorage() });
-
-app.set("trust proxy", true);
 
 const ROOT = path.resolve(process.env.APP_ROOT || "/app");
 const PORT = Number(process.env.PORT || 7860);
@@ -48,21 +43,17 @@ const PRESET_COMMANDS = {
 };
 
 const apiProxy = httpProxy.createProxyServer({
-  target: `http://0.0.0.0:${API_PORT}`,
+  target: `http://127.0.0.1:${API_PORT}`,
   changeOrigin: true,
   ws: true,
-  xfwd: true,
-  prependPath: false,
-  ignorePath: true
+  xfwd: true
 });
 
 const webProxy = httpProxy.createProxyServer({
-  target: `http://0.0.0.0:${FRONTEND_PORT}`,
+  target: `http://127.0.0.1:${FRONTEND_PORT}`,
   changeOrigin: true,
   ws: true,
-  xfwd: true,
-  prependPath: false,
-  ignorePath: true
+  xfwd: true
 });
 
 function normalizeBase(base) {
@@ -89,15 +80,26 @@ function addLog(line) {
   console.log(item.line);
 }
 
+function json(res, code, data) {
+  const body = JSON.stringify(data);
+  res.statusCode = code;
+  res.setHeader("content-type", "application/json; charset=utf-8");
+  res.end(body);
+}
+
+function html(res, code, body) {
+  res.statusCode = code;
+  res.setHeader("content-type", "text/html; charset=utf-8");
+  res.end(body);
+}
+
 function isInsideRoot(target) {
   return target === ROOT || target.startsWith(ROOT + path.sep);
 }
 
 function safeResolve(rel = "") {
   const target = path.resolve(ROOT, rel || ".");
-  if (!isInsideRoot(target)) {
-    throw new Error(`Path out of root: ${rel}`);
-  }
+  if (!isInsideRoot(target)) throw new Error(`Path out of root: ${rel}`);
   return target;
 }
 
@@ -107,14 +109,6 @@ function safeJoin(relDir = "", name = "") {
   return safeResolve(path.join(relDir || "", cleanName));
 }
 
-function requireAuth(req, res, next) {
-  if (!ADMIN_TOKEN) return next();
-  const token = req.headers["x-admin-token"] || req.query.token || "";
-  if (token === ADMIN_TOKEN) return next();
-  addLog(`[auth] deny ${req.method} ${req.originalUrl}`);
-  res.status(401).json({ ok: false, error: "Unauthorized" });
-}
-
 function formatSize(size) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
@@ -122,10 +116,20 @@ function formatSize(size) {
   return `${(size / 1024 / 1024 / 1024).toFixed(1)} GB`;
 }
 
+function requireAuthRaw(req, res) {
+  if (!ADMIN_TOKEN) return true;
+  const u = new URL(req.url, "http://local");
+  const token = req.headers["x-admin-token"] || u.searchParams.get("token") || "";
+  if (token === ADMIN_TOKEN) return true;
+  addLog(`[auth] deny ${req.method} ${req.url}`);
+  json(res, 401, { ok: false, error: "Unauthorized" });
+  return false;
+}
+
 function tcpProbe(port, tag) {
   return new Promise((resolve) => {
     const started = Date.now();
-    const socket = net.createConnection({ host: "0.0.0.0", port });
+    const socket = net.createConnection({ host: "127.0.0.1", port });
 
     const done = (data) => {
       try { socket.destroy(); } catch {}
@@ -134,18 +138,9 @@ function tcpProbe(port, tag) {
     };
 
     socket.setTimeout(1500);
-
-    socket.on("connect", () => {
-      done({ ok: true, port, ms: Date.now() - started });
-    });
-
-    socket.on("timeout", () => {
-      done({ ok: false, port, error: "timeout", ms: Date.now() - started });
-    });
-
-    socket.on("error", (e) => {
-      done({ ok: false, port, error: e.message, ms: Date.now() - started });
-    });
+    socket.on("connect", () => done({ ok: true, port, ms: Date.now() - started }));
+    socket.on("timeout", () => done({ ok: false, port, error: "timeout", ms: Date.now() - started }));
+    socket.on("error", (e) => done({ ok: false, port, error: e.message, ms: Date.now() - started }));
   });
 }
 
@@ -158,7 +153,7 @@ async function httpProbe(tag, url, headers = {}) {
       ok: true,
       status: res.status,
       statusText: res.statusText,
-      bodyPreview: text.slice(0, 160)
+      bodyPreview: text.slice(0, 180)
     };
     addLog(`[probe:http] ${tag} <- ${JSON.stringify(data)}`);
     return data;
@@ -173,10 +168,10 @@ async function runProbes() {
   probeState.lastRunAt = new Date().toISOString();
   probeState.frontendTcp = await tcpProbe(FRONTEND_PORT, "frontend");
   probeState.apiTcp = await tcpProbe(API_PORT, "api");
-  probeState.frontendHttp = await httpProbe("frontend", `http://0.0.0.0:${FRONTEND_PORT}/`);
+  probeState.frontendHttp = await httpProbe("frontend", `http://127.0.0.1:${FRONTEND_PORT}/`);
   probeState.apiHttp = await httpProbe(
     "api",
-    `http://0.0.0.0:${API_PORT}/api/audit/thread/default?userId=default`,
+    `http://127.0.0.1:${API_PORT}/api/audit/thread/default?userId=default`,
     { "X-Cat-Cafe-User": "default" }
   );
 }
@@ -189,10 +184,7 @@ function spawnCommand(cmd, tag = "task", onExit) {
     ["-lc", `cd ${JSON.stringify(ROOT)} && ${cmd}`],
     {
       cwd: ROOT,
-      env: {
-        ...process.env,
-        FORCE_COLOR: "1"
-      },
+      env: { ...process.env, FORCE_COLOR: "1" },
       detached: true,
       stdio: ["ignore", "pipe", "pipe"]
     }
@@ -270,10 +262,7 @@ async function listDir(rel = "") {
     dirents.map(async (d) => {
       const full = path.join(target, d.name);
       let st = null;
-      try {
-        st = await fs.stat(full);
-      } catch {}
-
+      try { st = await fs.stat(full); } catch {}
       return {
         name: d.name,
         path: path.relative(ROOT, full),
@@ -299,78 +288,273 @@ async function listDir(rel = "") {
   };
 }
 
-function proxyHttp(proxy, req, res, name) {
-  const originalUrl = req.originalUrl || req.url;
-  addLog(`[proxy:${name}] HTTP ${req.method} originalUrl=${originalUrl} url(before)=${req.url}`);
-
-  req.url = originalUrl;
-
+function proxyHttp(proxy, req, res, name, targetPort) {
+  addLog(`[proxy:${name}] HTTP ${req.method} ${req.url} -> 127.0.0.1:${targetPort}`);
   proxy.web(req, res, {}, (err) => {
-    addLog(`[proxy:${name}] HTTP ERROR ${req.method} ${originalUrl} ${err.message}`);
+    addLog(`[proxy:${name}] HTTP ERROR ${req.method} ${req.url} ${err.message}`);
     if (!res.headersSent) {
-      res.statusCode = 503;
-      res.setHeader("content-type", "application/json; charset=utf-8");
-      res.end(JSON.stringify({
+      json(res, 503, {
         ok: false,
         error: `${name} proxy error`,
         detail: err.message,
-        originalUrl
-      }));
+        url: req.url,
+        targetPort
+      });
     }
   });
 }
 
-function proxyWs(proxy, req, socket, head, name) {
-  const originalUrl = req.url;
-  addLog(`[proxy:${name}] WS upgrade url=${originalUrl}`);
-
+function proxyWs(proxy, req, socket, head, name, targetPort) {
+  addLog(`[proxy:${name}] WS ${req.url} -> 127.0.0.1:${targetPort}`);
   proxy.ws(req, socket, head, {}, (err) => {
-    addLog(`[proxy:${name}] WS ERROR ${originalUrl} ${err.message}`);
+    addLog(`[proxy:${name}] WS ERROR ${req.url} ${err.message}`);
     try { socket.destroy(); } catch {}
   });
 }
 
-apiProxy.on("proxyReq", (proxyReq, req) => {
-  addLog(`[proxy:api] -> ${req.method} ${req.url}`);
+apiProxy.on("proxyReq", (_proxyReq, req) => {
+  addLog(`[proxy:api] proxyReq ${req.method} ${req.url}`);
 });
-
 apiProxy.on("proxyRes", (proxyRes, req) => {
-  addLog(`[proxy:api] <- ${req.method} ${req.url} status=${proxyRes.statusCode}`);
+  addLog(`[proxy:api] proxyRes ${req.method} ${req.url} status=${proxyRes.statusCode}`);
 });
-
 apiProxy.on("error", (err, req) => {
   addLog(`[proxy:api] event error req=${req?.url || ""} err=${err.message}`);
 });
 
-webProxy.on("proxyReq", (proxyReq, req) => {
-  addLog(`[proxy:web] -> ${req.method} ${req.url}`);
+webProxy.on("proxyReq", (_proxyReq, req) => {
+  addLog(`[proxy:web] proxyReq ${req.method} ${req.url}`);
 });
-
 webProxy.on("proxyRes", (proxyRes, req) => {
-  addLog(`[proxy:web] <- ${req.method} ${req.url} status=${proxyRes.statusCode}`);
+  addLog(`[proxy:web] proxyRes ${req.method} ${req.url} status=${proxyRes.statusCode}`);
 });
-
 webProxy.on("error", (err, req) => {
   addLog(`[proxy:web] event error req=${req?.url || ""} err=${err.message}`);
 });
 
-/* ---------------- 先挂全局日志 ---------------- */
+/* ---------------- admin api app ---------------- */
 
-app.use((req, res, next) => {
-  const start = Date.now();
-  const skip = (req.originalUrl || "").includes(`${ADMIN_BASE}/api/logs`);
-  if (!skip) {
-    addLog(`[http] -> ${req.method} ${req.originalUrl} host=${req.headers.host} url=${req.url}`);
-  }
-  res.on("finish", () => {
-    if (!skip) {
-      addLog(`[http] <- ${req.method} ${req.originalUrl} status=${res.statusCode} dur=${Date.now() - start}ms`);
-    }
-  });
+const adminApi = express();
+const upload = multer({ storage: multer.memoryStorage() });
+
+adminApi.use(express.json({ limit: "10mb" }));
+adminApi.use(express.urlencoded({ extended: true }));
+
+adminApi.use((req, res, next) => {
+  if (!requireAuthRaw(req, res)) return;
   next();
 });
 
-/* ---------------- admin html，不重定向 ---------------- */
+adminApi.get("/status", async (_req, res) => {
+  res.json({
+    ok: true,
+    root: ROOT,
+    running: !!mainProc,
+    pid: mainProc?.pid || null,
+    startCmd: START_CMD,
+    adminEnableShell: ADMIN_ENABLE_SHELL,
+    presets: Object.keys(PRESET_COMMANDS),
+    probe: probeState
+  });
+});
+
+adminApi.post("/probe", async (_req, res) => {
+  await runProbes();
+  res.json({ ok: true, probe: probeState });
+});
+
+adminApi.post("/start", async (_req, res) => {
+  const started = startMain();
+  await runProbes();
+  res.json({ ok: true, started, running: !!mainProc });
+});
+
+adminApi.post("/stop", async (_req, res) => {
+  const stopped = stopMain();
+  await runProbes();
+  res.json({ ok: true, stopped, running: !!mainProc });
+});
+
+adminApi.post("/run", (req, res) => {
+  const { key, cmd } = req.body || {};
+
+  if (key && PRESET_COMMANDS[key]) {
+    addLog(`[admin] run preset key=${key}`);
+    spawnCommand(PRESET_COMMANDS[key], key);
+    return res.json({ ok: true, mode: "preset", key });
+  }
+
+  if (cmd && ADMIN_ENABLE_SHELL) {
+    addLog(`[admin] run shell cmd=${cmd}`);
+    spawnCommand(String(cmd), "shell");
+    return res.json({ ok: true, mode: "shell" });
+  }
+
+  addLog(`[admin] run rejected key=${key} cmd=${cmd}`);
+  return res.status(400).json({ ok: false, error: "Unknown command or shell disabled" });
+});
+
+adminApi.get("/logs", (req, res) => {
+  addLog("[admin] open logs sse");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  for (const item of logBuffer) {
+    res.write(`data: ${JSON.stringify(item)}\n\n`);
+  }
+
+  logClients.add(res);
+  req.on("close", () => {
+    logClients.delete(res);
+  });
+});
+
+adminApi.get("/fs", async (req, res) => {
+  try {
+    const rel = String(req.query.path || "");
+    addLog(`[fs] list path=${rel}`);
+    const data = await listDir(rel);
+    res.json(data);
+  } catch (e) {
+    addLog(`[fs] list error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.get("/file", async (req, res) => {
+  try {
+    const rel = String(req.query.path || "");
+    addLog(`[fs] read file path=${rel}`);
+    const target = safeResolve(rel);
+    const stat = await fs.stat(target);
+    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "Not a file" });
+    if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ ok: false, error: "File too large (>2MB)" });
+    const content = await fs.readFile(target, "utf8");
+    res.json({ ok: true, path: path.relative(ROOT, target), content });
+  } catch (e) {
+    addLog(`[fs] read file error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/file", async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    const content = String(req.body?.content ?? "");
+    addLog(`[fs] write file path=${rel} bytes=${Buffer.byteLength(content)}`);
+    const target = safeResolve(rel);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, content, "utf8");
+    res.json({ ok: true, path: rel });
+  } catch (e) {
+    addLog(`[fs] write file error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/fs/mkdir", async (req, res) => {
+  try {
+    const dir = String(req.body?.path || "");
+    const name = String(req.body?.name || "");
+    addLog(`[fs] mkdir dir=${dir} name=${name}`);
+    const target = safeJoin(dir, name);
+    await fs.mkdir(target, { recursive: true });
+    res.json({ ok: true });
+  } catch (e) {
+    addLog(`[fs] mkdir error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/fs/newfile", async (req, res) => {
+  try {
+    const dir = String(req.body?.path || "");
+    const name = String(req.body?.name || "");
+    addLog(`[fs] newfile dir=${dir} name=${name}`);
+    const target = safeJoin(dir, name);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    if (!fssync.existsSync(target)) await fs.writeFile(target, "", "utf8");
+    res.json({ ok: true, path: path.relative(ROOT, target) });
+  } catch (e) {
+    addLog(`[fs] newfile error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/fs/delete", async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    addLog(`[fs] delete path=${rel}`);
+    const target = safeResolve(rel);
+    if (target === ROOT) return res.status(403).json({ ok: false, error: "Cannot delete root" });
+    const stat = await fs.stat(target);
+    if (stat.isDirectory()) await fs.rm(target, { recursive: true, force: true });
+    else await fs.unlink(target);
+    res.json({ ok: true });
+  } catch (e) {
+    addLog(`[fs] delete error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/fs/rename", async (req, res) => {
+  try {
+    const rel = String(req.body?.path || "");
+    const newName = String(req.body?.newName || "");
+    addLog(`[fs] rename path=${rel} newName=${newName}`);
+    const oldTarget = safeResolve(rel);
+    const parentRel = path.dirname(rel) === "." ? "" : path.dirname(rel);
+    const newTarget = safeJoin(parentRel, newName);
+    await fs.rename(oldTarget, newTarget);
+    res.json({ ok: true, oldPath: rel, newPath: path.relative(ROOT, newTarget) });
+  } catch (e) {
+    addLog(`[fs] rename error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.get("/fs/download", async (req, res) => {
+  try {
+    const rel = String(req.query.path || "");
+    addLog(`[fs] download path=${rel}`);
+    const target = safeResolve(rel);
+    const stat = await fs.stat(target);
+    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "Not a file" });
+    res.download(target, path.basename(target));
+  } catch (e) {
+    addLog(`[fs] download error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+adminApi.post("/fs/upload", upload.any(), async (req, res) => {
+  try {
+    const dirRel = String(req.body?.path || "");
+    addLog(`[fs] upload dir=${dirRel} count=${(req.files || []).length}`);
+    const baseDir = safeResolve(dirRel);
+    const st = await fs.stat(baseDir);
+    if (!st.isDirectory()) return res.status(400).json({ ok: false, error: "Target is not a directory" });
+
+    let saved = 0;
+    for (const file of req.files || []) {
+      let relName = String(file.originalname || "").replace(/\\/g, "/").replace(/^\/+/, "");
+      if (!relName || relName.includes("..")) continue;
+      const dest = safeResolve(path.join(dirRel, relName));
+      await fs.mkdir(path.dirname(dest), { recursive: true });
+      await fs.writeFile(dest, file.buffer);
+      saved++;
+      addLog(`[fs] upload saved ${relName} -> ${dest}`);
+    }
+
+    res.json({ ok: true, saved });
+  } catch (e) {
+    addLog(`[fs] upload error ${e.message}`);
+    res.status(400).json({ ok: false, error: e.message });
+  }
+});
+
+/* ---------------- admin html ---------------- */
 
 const ADMIN_HTML = `<!doctype html>
 <html lang="zh-CN">
@@ -380,7 +564,7 @@ const ADMIN_HTML = `<!doctype html>
   <title>Clowder Admin</title>
   <style>
     * { box-sizing: border-box; }
-    body { margin:0; font-family: Arial, sans-serif; background:#0b1020; color:#e5e7eb; }
+    body { margin:0; font-family:Arial,sans-serif; background:#0b1020; color:#e5e7eb; }
     header { padding:16px 20px; background:#111827; border-bottom:1px solid #1f2937; }
     .wrap { padding:16px; }
     .card { background:#111827; border:1px solid #1f2937; border-radius:12px; padding:16px; margin-bottom:16px; }
@@ -786,288 +970,86 @@ const ADMIN_HTML = `<!doctype html>
 </body>
 </html>`;
 
-function serveAdminHtml(req, res) {
-  addLog(`[admin] serve html path=${req.path} originalUrl=${req.originalUrl}`);
-  res.setHeader("content-type", "text/html; charset=utf-8");
-  res.status(200).send(ADMIN_HTML);
-}
+/* ---------------- raw server ---------------- */
 
-app.get(ADMIN_BASE, serveAdminHtml);
-app.get(`${ADMIN_BASE}/`, serveAdminHtml);
-app.get(`${ADMIN_BASE}/*`, (req, res, next) => {
-  if (req.path.startsWith(`${ADMIN_BASE}/api/`)) return next();
-  serveAdminHtml(req, res);
-});
+const server = http.createServer((req, res) => {
+  const start = Date.now();
+  const originalUrl = req.url || "/";
+  const u = new URL(originalUrl, "http://local");
+  const pathname = u.pathname;
 
-/* ---------------- /api 和 /socket.io 提前 raw 代理 ---------------- */
-
-app.use("/api", (req, res) => {
-  addLog(`[route] API matched method=${req.method} originalUrl=${req.originalUrl} url=${req.url}`);
-  proxyHttp(apiProxy, req, res, "api");
-});
-
-app.use("/socket.io", (req, res) => {
-  addLog(`[route] SOCKET matched method=${req.method} originalUrl=${req.originalUrl} url=${req.url}`);
-  proxyHttp(apiProxy, req, res, "socket");
-});
-
-/* ---------------- admin api 解析器放在 proxy 后面 ---------------- */
-
-const adminApi = express.Router();
-adminApi.use(express.json({ limit: "10mb" }));
-adminApi.use(express.urlencoded({ extended: true }));
-
-adminApi.get("/status", requireAuth, async (_req, res) => {
-  res.json({
-    ok: true,
-    root: ROOT,
-    running: !!mainProc,
-    pid: mainProc?.pid || null,
-    startCmd: START_CMD,
-    adminEnableShell: ADMIN_ENABLE_SHELL,
-    presets: Object.keys(PRESET_COMMANDS),
-    probe: probeState
-  });
-});
-
-adminApi.post("/probe", requireAuth, async (_req, res) => {
-  await runProbes();
-  res.json({ ok: true, probe: probeState });
-});
-
-adminApi.post("/start", requireAuth, async (_req, res) => {
-  const started = startMain();
-  await runProbes();
-  res.json({ ok: true, started, running: !!mainProc });
-});
-
-adminApi.post("/stop", requireAuth, async (_req, res) => {
-  const stopped = stopMain();
-  await runProbes();
-  res.json({ ok: true, stopped, running: !!mainProc });
-});
-
-adminApi.post("/run", requireAuth, (req, res) => {
-  const { key, cmd } = req.body || {};
-
-  if (key && PRESET_COMMANDS[key]) {
-    addLog(`[admin] run preset key=${key}`);
-    spawnCommand(PRESET_COMMANDS[key], key);
-    return res.json({ ok: true, mode: "preset", key });
+  const skip = originalUrl.includes(`${ADMIN_BASE}/api/logs`);
+  if (!skip) {
+    addLog(`[http] -> ${req.method} ${originalUrl} host=${req.headers.host}`);
   }
 
-  if (cmd && ADMIN_ENABLE_SHELL) {
-    addLog(`[admin] run shell cmd=${cmd}`);
-    spawnCommand(String(cmd), "shell");
-    return res.json({ ok: true, mode: "shell" });
-  }
-
-  addLog(`[admin] run rejected key=${key} cmd=${cmd}`);
-  return res.status(400).json({ ok: false, error: "Unknown command or shell disabled" });
-});
-
-adminApi.get("/logs", requireAuth, (req, res) => {
-  addLog("[admin] open logs sse");
-  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-
-  for (const item of logBuffer) {
-    res.write(`data: ${JSON.stringify(item)}\n\n`);
-  }
-
-  logClients.add(res);
-  req.on("close", () => {
-    logClients.delete(res);
-  });
-});
-
-adminApi.get("/fs", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.query.path || "");
-    addLog(`[fs] list path=${rel}`);
-    const data = await listDir(rel);
-    res.json(data);
-  } catch (e) {
-    addLog(`[fs] list error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.get("/file", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.query.path || "");
-    addLog(`[fs] read file path=${rel}`);
-    const target = safeResolve(rel);
-    const stat = await fs.stat(target);
-    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "Not a file" });
-    if (stat.size > 2 * 1024 * 1024) return res.status(413).json({ ok: false, error: "File too large (>2MB)" });
-    const content = await fs.readFile(target, "utf8");
-    res.json({ ok: true, path: path.relative(ROOT, target), content });
-  } catch (e) {
-    addLog(`[fs] read file error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/file", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.body?.path || "");
-    const content = String(req.body?.content ?? "");
-    addLog(`[fs] write file path=${rel} bytes=${Buffer.byteLength(content)}`);
-    const target = safeResolve(rel);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, content, "utf8");
-    res.json({ ok: true, path: rel });
-  } catch (e) {
-    addLog(`[fs] write file error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/fs/mkdir", requireAuth, async (req, res) => {
-  try {
-    const dir = String(req.body?.path || "");
-    const name = String(req.body?.name || "");
-    addLog(`[fs] mkdir dir=${dir} name=${name}`);
-    const target = safeJoin(dir, name);
-    await fs.mkdir(target, { recursive: true });
-    res.json({ ok: true });
-  } catch (e) {
-    addLog(`[fs] mkdir error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/fs/newfile", requireAuth, async (req, res) => {
-  try {
-    const dir = String(req.body?.path || "");
-    const name = String(req.body?.name || "");
-    addLog(`[fs] newfile dir=${dir} name=${name}`);
-    const target = safeJoin(dir, name);
-    await fs.mkdir(path.dirname(target), { recursive: true });
-    if (!fssync.existsSync(target)) await fs.writeFile(target, "", "utf8");
-    res.json({ ok: true, path: path.relative(ROOT, target) });
-  } catch (e) {
-    addLog(`[fs] newfile error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/fs/delete", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.body?.path || "");
-    addLog(`[fs] delete path=${rel}`);
-    const target = safeResolve(rel);
-    if (target === ROOT) return res.status(403).json({ ok: false, error: "Cannot delete root" });
-    const stat = await fs.stat(target);
-    if (stat.isDirectory()) {
-      await fs.rm(target, { recursive: true, force: true });
-    } else {
-      await fs.unlink(target);
+  res.on("finish", () => {
+    if (!skip) {
+      addLog(`[http] <- ${req.method} ${originalUrl} status=${res.statusCode} dur=${Date.now() - start}ms`);
     }
-    res.json({ ok: true });
-  } catch (e) {
-    addLog(`[fs] delete error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/fs/rename", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.body?.path || "");
-    const newName = String(req.body?.newName || "");
-    addLog(`[fs] rename path=${rel} newName=${newName}`);
-    const oldTarget = safeResolve(rel);
-    const parentRel = path.dirname(rel) === "." ? "" : path.dirname(rel);
-    const newTarget = safeJoin(parentRel, newName);
-    await fs.rename(oldTarget, newTarget);
-    res.json({ ok: true, oldPath: rel, newPath: path.relative(ROOT, newTarget) });
-  } catch (e) {
-    addLog(`[fs] rename error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.get("/fs/download", requireAuth, async (req, res) => {
-  try {
-    const rel = String(req.query.path || "");
-    addLog(`[fs] download path=${rel}`);
-    const target = safeResolve(rel);
-    const stat = await fs.stat(target);
-    if (!stat.isFile()) return res.status(400).json({ ok: false, error: "Not a file" });
-    res.download(target, path.basename(target));
-  } catch (e) {
-    addLog(`[fs] download error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-adminApi.post("/fs/upload", requireAuth, upload.any(), async (req, res) => {
-  try {
-    const dirRel = String(req.body?.path || "");
-    addLog(`[fs] upload dir=${dirRel} count=${(req.files || []).length}`);
-    const baseDir = safeResolve(dirRel);
-    const st = await fs.stat(baseDir);
-    if (!st.isDirectory()) return res.status(400).json({ ok: false, error: "Target is not a directory" });
-
-    let saved = 0;
-    for (const file of req.files || []) {
-      let relName = String(file.originalname || "").replace(/\\/g, "/").replace(/^\/+/, "");
-      if (!relName || relName.includes("..")) continue;
-      const dest = safeResolve(path.join(dirRel, relName));
-      await fs.mkdir(path.dirname(dest), { recursive: true });
-      await fs.writeFile(dest, file.buffer);
-      saved++;
-      addLog(`[fs] upload saved ${relName} -> ${dest}`);
-    }
-
-    res.json({ ok: true, saved });
-  } catch (e) {
-    addLog(`[fs] upload error ${e.message}`);
-    res.status(400).json({ ok: false, error: e.message });
-  }
-});
-
-app.use(`${ADMIN_BASE}/api`, adminApi);
-
-/* ---------------- health ---------------- */
-
-app.get("/healthz", async (_req, res) => {
-  res.json({
-    ok: true,
-    running: !!mainProc,
-    ports: {
-      public: PORT,
-      frontend: FRONTEND_PORT,
-      api: API_PORT
-    },
-    probe: probeState
   });
+
+  if (pathname === "/healthz") {
+    return json(res, 200, {
+      ok: true,
+      running: !!mainProc,
+      ports: {
+        public: PORT,
+        frontend: FRONTEND_PORT,
+        api: API_PORT
+      },
+      probe: probeState
+    });
+  }
+
+  if (pathname === ADMIN_BASE || pathname === `${ADMIN_BASE}/`) {
+    addLog(`[route] ADMIN html ${originalUrl}`);
+    return html(res, 200, ADMIN_HTML);
+  }
+
+  if (pathname.startsWith(`${ADMIN_BASE}/api/`)) {
+    addLog(`[route] ADMIN api ${originalUrl}`);
+    const oldUrl = req.url;
+    req.url = pathname.slice(`${ADMIN_BASE}/api`.length) + (u.search || "");
+    return adminApi(req, res, (err) => {
+      req.url = oldUrl;
+      if (err) {
+        addLog(`[route] ADMIN api error ${err.message}`);
+        return json(res, 500, { ok: false, error: err.message });
+      }
+      return json(res, 404, { ok: false, error: "Admin API not found", path: pathname });
+    });
+  }
+
+  if (pathname.startsWith(`${ADMIN_BASE}/`)) {
+    addLog(`[route] ADMIN wildcard html ${originalUrl}`);
+    return html(res, 200, ADMIN_HTML);
+  }
+
+  if (pathname === "/api" || pathname.startsWith("/api/")) {
+    addLog(`[route] API ${originalUrl}`);
+    return proxyHttp(apiProxy, req, res, "api", API_PORT);
+  }
+
+  if (pathname === "/socket.io" || pathname.startsWith("/socket.io/")) {
+    addLog(`[route] SOCKET ${originalUrl}`);
+    return proxyHttp(apiProxy, req, res, "socket", API_PORT);
+  }
+
+  addLog(`[route] WEB ${originalUrl}`);
+  return proxyHttp(webProxy, req, res, "web", FRONTEND_PORT);
 });
-
-/* ---------------- 其他全部给前端 ---------------- */
-
-app.use((req, res) => {
-  addLog(`[route] WEB fallback method=${req.method} originalUrl=${req.originalUrl} url=${req.url}`);
-  proxyHttp(webProxy, req, res, "web");
-});
-
-/* ---------------- upgrade ---------------- */
 
 server.on("upgrade", (req, socket, head) => {
-  const url = req.url || "";
-  addLog(`[upgrade] url=${url}`);
+  const url = req.url || "/";
+  addLog(`[upgrade] ${url}`);
 
-  if (url.startsWith("/socket.io")) {
-    proxyWs(apiProxy, req, socket, head, "api");
-    return;
+  if (url === "/socket.io" || url.startsWith("/socket.io/")) {
+    return proxyWs(apiProxy, req, socket, head, "api", API_PORT);
   }
 
-  proxyWs(webProxy, req, socket, head, "web");
+  return proxyWs(webProxy, req, socket, head, "web", FRONTEND_PORT);
 });
-
-/* ---------------- boot ---------------- */
 
 server.listen(PORT, "0.0.0.0", async () => {
   addLog(`[boot] manager listen 0.0.0.0:${PORT}`);
