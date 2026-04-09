@@ -48,7 +48,7 @@ const PRESET_COMMANDS = {
 };
 
 const apiProxy = httpProxy.createProxyServer({
-  target: `http://127.0.0.1:${API_PORT}`,
+  target: `http://0.0.0.0:${API_PORT}`,
   changeOrigin: true,
   ws: true,
   xfwd: true,
@@ -57,7 +57,7 @@ const apiProxy = httpProxy.createProxyServer({
 });
 
 const webProxy = httpProxy.createProxyServer({
-  target: `http://127.0.0.1:${FRONTEND_PORT}`,
+  target: `http://0.0.0.0:${FRONTEND_PORT}`,
   changeOrigin: true,
   ws: true,
   xfwd: true,
@@ -125,7 +125,7 @@ function formatSize(size) {
 function tcpProbe(port, tag) {
   return new Promise((resolve) => {
     const started = Date.now();
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = net.createConnection({ host: "0.0.0.0", port });
 
     const done = (data) => {
       try { socket.destroy(); } catch {}
@@ -173,10 +173,10 @@ async function runProbes() {
   probeState.lastRunAt = new Date().toISOString();
   probeState.frontendTcp = await tcpProbe(FRONTEND_PORT, "frontend");
   probeState.apiTcp = await tcpProbe(API_PORT, "api");
-  probeState.frontendHttp = await httpProbe("frontend", `http://127.0.0.1:${FRONTEND_PORT}/`);
+  probeState.frontendHttp = await httpProbe("frontend", `http://0.0.0.0:${FRONTEND_PORT}/`);
   probeState.apiHttp = await httpProbe(
     "api",
-    `http://127.0.0.1:${API_PORT}/api/audit/thread/default?userId=default`,
+    `http://0.0.0.0:${API_PORT}/api/audit/thread/default?userId=default`,
     { "X-Cat-Cafe-User": "default" }
   );
 }
