@@ -1,16 +1,49 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+log() {
+  echo "[entrypoint] $*"
+}
+
+set_kv() {
+  local key="$1"
+  local val="$2"
+  if grep -q "^${key}=" .env 2>/dev/null; then
+    sed -i "s|^${key}=.*|${key}=${val}|" .env
+  else
+    echo "${key}=${val}" >> .env
+  fi
+}
+
+log "boot start"
 cd /app
+log "cwd=$(pwd)"
+log "whoami=$(whoami)"
+log "PORT=${PORT:-}"
+log "FRONTEND_PORT=${FRONTEND_PORT:-}"
+log "API_SERVER_PORT=${API_SERVER_PORT:-}"
+log "REDIS_PORT=${REDIS_PORT:-}"
+log "ADMIN_BASE_PATH=${ADMIN_BASE_PATH:-}"
 
 if [ ! -f .env ] && [ -f .env.example ]; then
+  log "copy .env.example -> .env"
   cp .env.example .env
 fi
 
-# 自动生成最小可用 .mcp.json
+touch .env
+set_kv FRONTEND_PORT "${FRONTEND_PORT:-3003}"
+set_kv API_SERVER_PORT "${API_SERVER_PORT:-3004}"
+set_kv REDIS_PORT "${REDIS_PORT:-6399}"
+set_kv NEXT_PUBLIC_API_URL "/api"
+
+log "effective .env:"
+cat .env || true
+
 if [ -n "${MCP_JSON_B64:-}" ]; then
+  log "write /app/.mcp.json from MCP_JSON_B64"
   echo "$MCP_JSON_B64" | base64 -d > /app/.mcp.json
 elif [ ! -f /app/.mcp.json ]; then
+  log "create default /app/.mcp.json"
   cat >/app/.mcp.json <<'EOF'
 {
   "mcpServers": {}
@@ -18,28 +51,33 @@ elif [ ! -f /app/.mcp.json ]; then
 EOF
 fi
 
-# 优先使用外部持久化目录
 DATA_ROOT="${PERSIST_ROOT:-}"
-
 if [ -z "${DATA_ROOT}" ]; then
   if mkdir -p /data/clowder-ai >/dev/null 2>&1; then
     DATA_ROOT="/data/clowder-ai"
+    log "using DATA_ROOT=${DATA_ROOT}"
   else
     DATA_ROOT="/app/data"
+    log "/data not writable, fallback DATA_ROOT=${DATA_ROOT}"
   fi
 fi
 
 mkdir -p "${DATA_ROOT}"
+mkdir -p "${DATA_ROOT}/redis"
+mkdir -p "${DATA_ROOT}/logs"
 
 if [ "${DATA_ROOT}" != "/app/data" ]; then
-  rm -rf /app/data
+  log "link /app/data -> ${DATA_ROOT}"
+  rm -rf /app/data || true
   ln -s "${DATA_ROOT}" /app/data
+else
+  mkdir -p /app/data
 fi
 
-mkdir -p /app/data
-mkdir -p /app/data/redis
-mkdir -p /app/data/logs
+log "ls -la /app"
+ls -la /app || true
+log "ls -la /app/data"
+ls -la /app/data || true
 
-chown -R node:node /app /opt/manager "${DATA_ROOT}" || true
-
+log "start manager node /opt/manager/server.js"
 exec node /opt/manager/server.js
