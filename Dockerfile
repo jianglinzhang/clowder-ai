@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 FROM node:20-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
@@ -16,16 +18,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
 
 WORKDIR /app
-
 COPY . .
 
-# 没有 .env 时，先复制一个，避免某些构建脚本读取失败
 RUN if [ ! -f .env ] && [ -f .env.example ]; then cp .env.example .env; fi
+
+RUN bash -lc '\
+set -eux; \
+touch .env; \
+set_kv(){ key="$1"; val="$2"; if grep -q "^${key}=" .env; then sed -i "s|^${key}=.*|${key}=${val}|" .env; else echo "${key}=${val}" >> .env; fi; }; \
+set_kv FRONTEND_PORT 3003; \
+set_kv API_SERVER_PORT 3004; \
+set_kv REDIS_PORT 6399; \
+set_kv NEXT_PUBLIC_API_URL /api; \
+echo "[build] final .env"; cat .env; \
+'
 
 RUN pnpm install --frozen-lockfile
 RUN pnpm build
 
-# 安装管理面板依赖
 WORKDIR /opt/manager
 COPY docker/manager/package.json /opt/manager/package.json
 RUN npm install --omit=dev
@@ -54,39 +64,20 @@ COPY --from=build /app /app
 COPY --from=build /opt/manager /opt/manager
 COPY docker/entrypoint.sh /entrypoint.sh
 
-RUN mkdir -p /app/data /data/redis \
-    && chmod +x /entrypoint.sh \
-    && chown -R node:node /app /opt/manager /data /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
 ENV NODE_ENV=production
 ENV APP_ROOT=/app
-
-# 外部平台只暴露一个端口，默认 7860
 ENV PORT=7860
-
-# 项目内部端口
 ENV FRONTEND_PORT=3003
 ENV API_SERVER_PORT=3004
 ENV REDIS_PORT=6399
-
-# 容器启动后自动拉起主程序
 ENV AUTO_START=1
-
-# 默认
 ENV APP_START_CMD="pnpm start:direct"
-
-# 管理面板路径
 ENV ADMIN_BASE_PATH=/admin
-
-# 默认禁用任意 shell，自定义命令可手动开启
-ENV ADMIN_ENABLE_SHELL=1
-
-# 建议你在部署平台里设置这个
-# ENV ADMIN_TOKEN=change-me
-
-USER node
+ENV ADMIN_ENABLE_SHELL=0
+ENV MAX_LOG_LINES=5000
 
 EXPOSE 7860
 
-ENTRYPOINT ["dumb-init", "--"]
-CMD ["/entrypoint.sh"]
+ENTRYPOINT ["dumb-init", "--", "/entrypoint.sh"]
