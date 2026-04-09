@@ -73,7 +73,7 @@ ENV REDIS_PORT=6399
 ENV AUTO_START=1
 
 # 默认
-ENV APP_START_CMD="pnpm start"
+ENV APP_START_CMD="pnpm start:direct"
 
 # 管理面板路径
 ENV ADMIN_BASE_PATH=/admin
