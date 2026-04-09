@@ -72,8 +72,8 @@ ENV REDIS_PORT=6399
 # 容器启动后自动拉起主程序
 ENV AUTO_START=1
 
-# 默认采用 direct 模式，避免 runtime worktree 在容器里出问题
-ENV APP_START_CMD="pnpm start:direct"
+# 默认
+ENV APP_START_CMD="pnpm start"
 
 # 管理面板路径
 ENV ADMIN_BASE_PATH=/admin
