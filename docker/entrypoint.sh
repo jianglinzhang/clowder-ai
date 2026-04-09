@@ -23,7 +23,7 @@ log "PORT=${PORT:-}"
 log "FRONTEND_PORT=${FRONTEND_PORT:-}"
 log "API_SERVER_PORT=${API_SERVER_PORT:-}"
 log "REDIS_PORT=${REDIS_PORT:-}"
-log "ADMIN_BASE_PATH=${ADMIN_BASE_PATH:-}"
+log "MANAGER_PORT=${MANAGER_PORT:-}"
 
 if [ ! -f .env ] && [ -f .env.example ]; then
   log "copy .env.example -> .env"
@@ -82,5 +82,15 @@ ls -la /app/data || true
 log "ls -la /app/packages/api/data"
 ls -la /app/packages/api/data || true
 
-log "start manager node /opt/manager/server.js"
-exec node /opt/manager/server.js
+log "start flask manager"
+python3 -u /opt/manager.py &
+MANAGER_PID=$!
+log "manager pid=${MANAGER_PID}"
+
+sleep 1
+
+log "nginx -t"
+nginx -t
+
+log "start nginx foreground"
+exec nginx -g 'daemon off;'
