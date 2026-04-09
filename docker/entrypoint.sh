@@ -65,6 +65,7 @@ fi
 mkdir -p "${DATA_ROOT}"
 mkdir -p "${DATA_ROOT}/redis"
 mkdir -p "${DATA_ROOT}/logs"
+mkdir -p /app/packages/api/data/connector-media
 
 if [ "${DATA_ROOT}" != "/app/data" ]; then
   log "link /app/data -> ${DATA_ROOT}"
@@ -78,6 +79,8 @@ log "ls -la /app"
 ls -la /app || true
 log "ls -la /app/data"
 ls -la /app/data || true
+log "ls -la /app/packages/api/data"
+ls -la /app/packages/api/data || true
 
 log "start manager node /opt/manager/server.js"
 exec node /opt/manager/server.js
