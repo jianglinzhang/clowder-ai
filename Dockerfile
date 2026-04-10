@@ -1,88 +1,54 @@
-# syntax=docker/dockerfile:1.7
+# 使用官方 Node 20 镜像 (Debian 基础镜像，包含充足的编译工具)
+FROM node:20-bookworm-slim
 
-FROM node:20-bookworm-slim AS build
-
-ENV PNPM_HOME=/pnpm
-ENV PATH=$PNPM_HOME:$PATH
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
+# 安装系统级依赖：Redis 7+, Nginx, Git
+RUN apt-get update && apt-get install -y \
     redis-server \
-    bash \
-    python3 \
-    make \
-    g++ \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
-
-WORKDIR /app
-
-COPY . .
-
-RUN if [ ! -f .env ] && [ -f .env.example ]; then cp .env.example .env; fi
-
-RUN bash -lc '\
-set -eux; \
-touch .env; \
-set_kv(){ key="$1"; val="$2"; if grep -q "^${key}=" .env; then sed -i "s|^${key}=.*|${key}=${val}|" .env; else echo "${key}=${val}" >> .env; fi; }; \
-set_kv FRONTEND_PORT 3003; \
-set_kv API_SERVER_PORT 3004; \
-set_kv REDIS_PORT 6399; \
-set_kv NEXT_PUBLIC_API_URL /api; \
-echo "[build] final .env"; cat .env; \
-'
-
-RUN pnpm install --frozen-lockfile
-RUN pnpm build
-
-
-FROM node:20-bookworm-slim AS runtime
-
-ENV PNPM_HOME=/pnpm
-ENV PATH=/opt/venv/bin:$PNPM_HOME:$PATH
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    ca-certificates \
-    redis-server \
-    bash \
-    procps \
-    dumb-init \
     nginx \
-    python3 \
-    python3-venv \
+    git \
     && rm -rf /var/lib/apt/lists/*
 
-RUN python3 -m venv /opt/venv \
-    && /opt/venv/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
-    && /opt/venv/bin/pip install --no-cache-dir flask==3.0.3
+# 启用 pnpm 9+
+RUN corepack enable && corepack prepare pnpm@9 --activate
 
-RUN corepack enable && corepack prepare pnpm@9.15.4 --activate
+# Hugging Face 要求以 user 1000 运行。'node' 用户默认 UID 就是 1000。
+# 创建并赋予所需目录的所有权，确保非 root 用户能正常写入
+RUN mkdir -p /app/data /app/logs /tmp/client_body /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp \
+    && chown -R node:node /app /tmp/client_body /tmp/proxy_temp /tmp/fastcgi_temp /tmp/uwsgi_temp /tmp/scgi_temp /var/lib/nginx /var/log/nginx
 
 WORKDIR /app
+USER node
 
-COPY --from=build /app /app
-COPY docker/entrypoint.sh /entrypoint.sh
-COPY docker/manager.py /opt/manager.py
-COPY docker/nginx.conf /etc/nginx/nginx.conf
+# 拷贝项目文件并设置权限
+COPY --chown=node:node . .
 
-RUN chmod +x /entrypoint.sh \
-    && mkdir -p /var/lib/nginx /var/log/nginx /run/nginx
+# 复制默认环境变量配置
+RUN cp .env.example .env
 
-ENV NODE_ENV=production
-ENV APP_ROOT=/app
-ENV PORT=7860
+# =================环境变量配置=================
+# 强制覆盖环境变量，使用空字符串覆盖 API_URL，
+# 这样前端将自动使用相对路径，经由 Nginx 将请求完美转发。
 ENV FRONTEND_PORT=3003
 ENV API_SERVER_PORT=3004
 ENV REDIS_PORT=6399
-ENV MANAGER_PORT=7861
-ENV AUTO_START=1
-ENV APP_START_CMD="pnpm start:direct"
-ENV ADMIN_ENABLE_SHELL=0
-ENV MAX_LOG_LINES=5000
+ENV REDIS_URL="redis://127.0.0.1:6399"
+ENV NEXT_PUBLIC_API_URL=""
 
+# 如果你不需要 Redis 数据持久化，可以取消注释下面这行开启纯内存模式
+# ENV START_ARGS="--memory" 
+# ============================================
+
+# 安装 Node 依赖
+RUN pnpm install
+
+# 编译所有包 (Next.js 等)
+RUN pnpm build
+
+# 授予启动脚本执行权限
+RUN chmod +x /app/entrypoint.sh
+
+# 暴露给云平台的单一通信端口
 EXPOSE 7860
 
-ENTRYPOINT ["dumb-init", "--", "/entrypoint.sh"]
+# 指定启动入口
+ENTRYPOINT["/app/entrypoint.sh"]
