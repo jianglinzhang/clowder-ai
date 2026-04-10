@@ -51,4 +51,4 @@ RUN chmod +x /app/docker/entrypoint.sh
 EXPOSE 7860
 
 # 指定启动入口
-ENTRYPOINT["/app/docker/entrypoint.sh"]
+ENTRYPOINT ["/app/docker/entrypoint.sh"]
