@@ -45,10 +45,10 @@ RUN pnpm install
 RUN pnpm build
 
 # 授予启动脚本执行权限
-RUN chmod +x /app/entrypoint.sh
+RUN chmod +x /app/docker/entrypoint.sh
 
 # 暴露给云平台的单一通信端口
 EXPOSE 7860
 
 # 指定启动入口
-ENTRYPOINT["/app/entrypoint.sh"]
+ENTRYPOINT["/app/docker/entrypoint.sh"]
